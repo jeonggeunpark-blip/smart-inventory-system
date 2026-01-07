@@ -1,0 +1,895 @@
+<script>
+    const InputApp = (() => {
+        // ==========================================
+        // 1. 전역 변수 선언
+        // ==========================================
+        let globalData = [];
+        let masterData = [];
+        let isLoaded = false;
+        let editedFiles = { file1: null, file2: null, file3: null };
+        let currentTargetFileId = null;
+        let pendingDeleteId = null;
+        let videoStream = null;
+        let isScanning = false;
+        let sessionUploadCount = 0;
+
+        // 드로잉(편집) 관련 변수
+        let currentDrawingFileId = null;
+        let canvas, ctx;
+        let isDrawing = false;
+        let drawingImg = new Image(); 
+        let currentTool = 'pen';      
+        let startX, startY;           
+        let snapshot;                 
+        let history = [];             
+
+        // 페이징 관련 변수
+        let currentRenderCount = 10; 
+        const RENDER_INCREMENT = 10; 
+
+        // ==========================================
+        // 2. 초기화 및 이벤트 리스너
+        // ==========================================
+        function init() {
+            loadData();
+            setupEventListeners();
+        }
+
+        function setupEventListeners() {
+            // 이름 리스트 선택 문제 해결 (입력창/리스트 외 클릭 시 닫기)
+            document.addEventListener('click', function(e) {
+                if (!e.target.closest('#form-name') && !e.target.closest('#name-suggestions')) { 
+                    const list = document.getElementById('name-suggestions'); 
+                    if(list) list.classList.add('hidden'); 
+                }
+            });
+
+            // 모바일 키보드 대응
+            const inputs = document.querySelectorAll('#dataForm input, #dataForm select');
+            inputs.forEach(input => {
+                input.addEventListener('focus', function() {
+                    setTimeout(() => {
+                        this.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }, 300);
+                });
+            });
+        }
+
+        // ==========================================
+        // ★ [추가] 커스텀 알림창 제어 함수
+        // ==========================================
+        function showCustomAlert(missingFields) {
+            const modal = document.getElementById('custom-alert-modal');
+            const list = document.getElementById('custom-alert-list');
+            const innerCard = modal.firstElementChild;
+
+            if (!modal || !list) {
+                alert("Missing: " + missingFields.map(f => f.label).join(', '));
+                return;
+            }
+
+            // 리스트 생성
+            list.innerHTML = missingFields.map(f => `
+                <li class="flex items-center gap-3 text-sm font-bold text-slate-700 dark:text-slate-200">
+                    <span class="flex items-center justify-center w-5 h-5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-500 text-[10px]">
+                        <i class="ph-bold ph-x"></i>
+                    </span>
+                    ${f.label}
+                </li>
+            `).join('');
+
+            // 열기 애니메이션
+            modal.classList.remove('hidden');
+            setTimeout(() => {
+                modal.classList.remove('opacity-0');
+                innerCard.classList.remove('scale-95');
+                innerCard.classList.add('scale-100');
+            }, 10);
+            
+            // 햅틱 피드백 (모바일 진동)
+            if (navigator.vibrate) navigator.vibrate(200); 
+        }
+
+        function closeCustomAlert() {
+            const modal = document.getElementById('custom-alert-modal');
+            if (!modal) return;
+            const innerCard = modal.firstElementChild;
+
+            // 닫기 애니메이션
+            modal.classList.add('opacity-0');
+            innerCard.classList.remove('scale-100');
+            innerCard.classList.add('scale-95');
+
+            setTimeout(() => {
+                modal.classList.add('hidden');
+            }, 300);
+        }
+
+        // ==========================================
+        // 3. 데이터 로드 및 렌더링
+        // ==========================================
+        function loadData() {
+            const spinner = document.getElementById('loadingSpinner');
+            if(spinner) spinner.classList.remove('hidden');
+            
+            Promise.all([
+                new Promise(resolve => google.script.run.withSuccessHandler(resolve).getInventoryData()),
+                new Promise(resolve => google.script.run.withSuccessHandler(resolve).getMasterData())
+            ]).then(([inventoryData, mstData]) => {
+                globalData = (inventoryData || []).sort((a, b) => new Date(b.date) - new Date(a.date));
+                masterData = mstData || [];
+                currentRenderCount = RENDER_INCREMENT; 
+                renderGroupedList(globalData);
+                isLoaded = true;
+                if(spinner) spinner.classList.add('hidden');
+            }).catch(err => { 
+                console.error(err); 
+                if(spinner) spinner.classList.add('hidden'); 
+            });
+        }
+
+        function renderGroupedList(data, append = false) {
+            const container = document.getElementById('input-list-container');
+            if (!append) container.innerHTML = "";
+            const oldBtn = document.getElementById('btn-load-more-input');
+            if(oldBtn) oldBtn.remove();
+
+            if(!data || data.length === 0) { 
+                container.innerHTML = `<div class="text-center py-16 text-slate-400 flex flex-col items-center gap-3"><i class="ph-duotone ph-ghost text-4xl opacity-50"></i><span class="text-sm font-medium">データがありません</span></div>`; 
+                return; 
+            }
+
+            const groupedByDate = data.reduce((acc, item) => {
+                const dateKey = item.date ? String(item.date).substring(0, 10) : '日付なし';
+                if (!acc[dateKey]) acc[dateKey] = [];
+                acc[dateKey].push(item);
+                return acc;
+            }, {});
+
+            const sortedDates = Object.keys(groupedByDate).sort().reverse();
+            const totalDates = sortedDates.length;
+            const existingGroups = container.querySelectorAll('details.group').length;
+            const startIdx = append ? existingGroups : 0;
+            const targetDates = sortedDates.slice(startIdx, currentRenderCount);
+
+            targetDates.forEach(date => {
+                const dateItems = groupedByDate[date];
+                const todayStr = new Date().toISOString().slice(0, 10);
+                const isOpen = (date === todayStr) ? 'open' : ''; 
+                let dayName = '';
+                try { dayName = ['日', '月', '火', '水', '木', '金', '土'][new Date(date).getDay()]; } catch(e){}
+
+                const groupedByLocation = dateItems.reduce((acc, item) => {
+                    const locKey = item.location || '場所未定';
+                    if (!acc[locKey]) acc[locKey] = [];
+                    acc[locKey].push(item);
+                    return acc;
+                }, {});
+                
+                const sortedLocations = Object.keys(groupedByLocation).sort();
+                const locationHtml = sortedLocations.map(loc => {
+                    const locItems = groupedByLocation[loc];
+                    // ★ 수량 내림차순 정렬 추가
+                    locItems.sort((a, b) => (parseInt(b.qty) || 0) - (parseInt(a.qty) || 0));
+                    
+                    const itemsHtml = locItems.map(item => createItemHTML(item)).join('');
+                    return `
+                        <div class="pl-3 pr-2 py-2">
+                            <details open class="group/loc">
+                                <summary class="flex items-center justify-between cursor-pointer list-none mb-2">
+                                    <div class="flex items-center gap-2 text-slate-500 dark:text-slate-400">
+                                        <i class="ph-fill ph-map-pin text-blue-500"></i>
+                                        <span class="text-xs font-bold truncate max-w-[200px]">${loc}</span>
+                                        <span class="bg-slate-100 dark:bg-slate-700 text-[10px] px-1.5 py-0.5 rounded-full font-bold text-slate-500 dark:text-slate-300">${locItems.length}</span>
+                                    </div>
+                                    <i class="ph-bold ph-caret-down text-xs text-slate-300 transition-transform group-open/loc:rotate-180"></i>
+                                </summary>
+                                <div class="space-y-2 pl-2 border-l-2 border-slate-100 dark:border-slate-800">
+                                    ${itemsHtml}
+                                </div>
+                            </details>
+                        </div>
+                    `;
+                }).join('');
+
+                const groupHtml = `
+                    <details ${isOpen} class="group bg-white dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800 last:border-0 animate-fade-in">
+                        <summary class="sticky top-0 z-20 bg-slate-50 dark:bg-slate-800/50 px-4 py-3 flex justify-between items-center cursor-pointer select-none backdrop-blur-sm transition-colors hover:bg-slate-100 dark:hover:bg-slate-700/50">
+                            <h3 class="font-bold text-sm text-slate-700 dark:text-slate-200">${date} <span class="text-xs font-normal opacity-70 ml-1">(${dayName || '-'})</span></h3>
+                            <div class="flex items-center gap-2">
+                                <span class="bg-white dark:bg-slate-700 px-2 py-0.5 rounded-md text-xs font-bold text-slate-500 shadow-sm border border-slate-200 dark:border-slate-600">${dateItems.length}</span>
+                                <i class="ph-bold ph-caret-down text-slate-400 transition-transform group-open:rotate-180"></i>
+                            </div>
+                        </summary>
+                        <div class="divide-y divide-slate-50 dark:divide-slate-800/50 pb-2">
+                            ${locationHtml}
+                        </div>
+                    </details>
+                `;
+                container.insertAdjacentHTML('beforeend', groupHtml);
+            });
+
+            if (currentRenderCount < totalDates) {
+                const btnHtml = `
+                    <div id="btn-load-more-input" class="py-4 text-center">
+                        <button onclick="InputApp.loadMoreItems()" class="text-sm font-bold text-blue-500 hover:text-blue-600 bg-blue-50 dark:bg-blue-900/20 px-6 py-3 rounded-xl transition-colors">
+                            もっと見る (${totalDates - currentRenderCount}日分)
+                        </button>
+                    </div>
+                `;
+                container.insertAdjacentHTML('beforeend', btnHtml);
+            }
+        }
+
+        function loadMoreItems() {
+            currentRenderCount += RENDER_INCREMENT;
+            const searchVal = document.getElementById('input-search').value;
+            let dataToRender = globalData;
+            if (searchVal) {
+                const lower = searchVal.toLowerCase();
+                dataToRender = globalData.filter(i => i.name.toLowerCase().includes(lower) || i.location.toLowerCase().includes(lower));
+            }
+            renderGroupedList(dataToRender, true);
+        }
+
+        // ★ [수정] 수량 왼쪽 배치 + 일본어 버튼 적용
+        function createItemHTML(item) {
+            const itemId = item.id;
+            
+            return `
+                <div class="bg-white dark:bg-slate-800 rounded-xl p-3 flex gap-3 shadow-sm border border-slate-100 dark:border-slate-700 items-center animate-fade-in relative hover:border-blue-200 dark:hover:border-blue-800 transition-colors">
+                    
+                    <div class="flex flex-col items-center justify-center min-w-[50px] bg-slate-50 dark:bg-slate-700/50 rounded-lg py-1 px-2 border border-slate-100 dark:border-slate-600">
+                        <span class="text-lg font-black text-blue-600 dark:text-blue-400 leading-none">
+                            ${item.qty}
+                        </span>
+                        <span class="text-[9px] text-slate-400 font-bold mt-0.5">数量</span>
+                    </div>
+
+                    <div class="flex-1 min-w-0 cursor-pointer px-1" onclick="InputApp.openPanel('detail', '${itemId}')">
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm font-bold text-slate-900 dark:text-white truncate">
+                                ${item.name || '名称なし'}
+                            </span>
+                            <span class="text-slate-300 dark:text-slate-600 text-xs">|</span>
+                            <span class="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                                ${item.dept || '-'}
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center gap-1 shrink-0">
+                        <button onclick="InputApp.openPanel('edit', '${itemId}')" 
+                            class="flex flex-col items-center justify-center w-10 h-11 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-700 transition-colors">
+                            <i class="ph-bold ph-pencil-simple text-lg"></i>
+                            <span class="text-[8px] font-bold mt-0.5">修正</span>
+                        </button>
+                        
+                        <button onclick="InputApp.requestDelete('${itemId}', event)" 
+                            class="flex flex-col items-center justify-center w-10 h-11 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors">
+                            <i class="ph-bold ph-trash text-lg"></i>
+                            <span class="text-[8px] font-bold mt-0.5">削除</span>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        // ==========================================
+        // 4. 패널 및 폼 제어
+        // ==========================================
+        function openPanel(mode, id) {
+            const detailView = document.getElementById('detail-view');
+            const dataForm = document.getElementById('dataForm');
+            const editBtn = document.getElementById('btn-edit-mode');
+            const formFooter = document.getElementById('form-footer');
+            const panelTitle = document.getElementById('panel-title');
+            
+            document.getElementById('dataForm').reset();
+            document.getElementById('form-id').value = "";
+            
+            ['preview1', 'preview2', 'preview3'].forEach(pid => {
+                const p = document.getElementById(pid);
+                if(p) p.classList.add('hidden');
+            });
+            ['btn-draw-file1', 'btn-draw-file2', 'btn-draw-file3'].forEach(bid => {
+                const b = document.getElementById(bid);
+                if(b) b.classList.add('hidden'); 
+            });
+
+            editedFiles = { file1: null, file2: null, file3: null };
+
+            if (mode === 'create') {
+                if(panelTitle) panelTitle.innerText = "新規登録";
+                if(detailView) detailView.style.display = 'none';
+                if(editBtn) editBtn.style.display = 'none';
+                if(dataForm) { dataForm.classList.remove('hidden'); dataForm.style.display = 'block'; }
+                if(formFooter) { formFooter.classList.remove('hidden'); formFooter.style.display = 'block'; updateCounterDisplay(); }
+                
+                const today = new Date();
+                const yyyy = today.getFullYear();
+                const mm = String(today.getMonth() + 1).padStart(2, '0');
+                const dd = String(today.getDate()).padStart(2, '0');
+                document.getElementById('form-date').value = `${yyyy}-${mm}-${dd}`;
+                
+            } else if (mode === 'edit') {
+                if(panelTitle) panelTitle.innerText = "内容の編集";
+                if(detailView) detailView.style.display = 'none';
+                if(editBtn) editBtn.style.display = 'none'; 
+                if(dataForm) { dataForm.classList.remove('hidden'); dataForm.style.display = 'block'; }
+                if(formFooter) { formFooter.classList.remove('hidden'); formFooter.style.display = 'block'; }
+                const counterEl = document.getElementById('session-counter-display');
+                if(counterEl) counterEl.style.display = 'none';
+                const item = globalData.find(i => String(i.id) === String(id));
+                if (item) fillForm(item);
+            } else { 
+                if(panelTitle) panelTitle.innerText = "詳細情報";
+                if(detailView) { detailView.classList.remove('hidden'); detailView.style.display = 'block'; }
+                if(editBtn) { editBtn.classList.remove('hidden'); editBtn.style.display = 'flex'; }
+                if(dataForm) { dataForm.classList.add('hidden'); dataForm.style.display = 'none'; }
+                if(formFooter) { formFooter.classList.add('hidden'); formFooter.style.display = 'none'; }
+                const item = globalData.find(i => String(i.id) === String(id));
+                if (item) { fillDetailView(item); fillForm(item); }
+            }
+            const overlay = document.getElementById('form-overlay');
+            const panel = document.getElementById('form-panel');
+            overlay.style.display = 'block';
+            setTimeout(() => { overlay.classList.add('open'); panel.classList.add('open'); }, 10);
+        }
+
+        function updateCounterDisplay() {
+            const counterEl = document.getElementById('session-counter-display');
+            if(counterEl) {
+                counterEl.style.display = 'inline-block';
+                counterEl.innerText = `今回: ${sessionUploadCount}件`;
+            }
+        }
+        function enableEditMode() {
+            const detailView = document.getElementById('detail-view');
+            const dataForm = document.getElementById('dataForm');
+            const editBtn = document.getElementById('btn-edit-mode');
+            const formFooter = document.getElementById('form-footer');
+            const panelTitle = document.getElementById('panel-title');
+            if (panelTitle) panelTitle.innerText = "内容の編集";
+            if (detailView) { detailView.classList.add('hidden'); detailView.style.display = 'none'; }
+            if (editBtn) { editBtn.classList.add('hidden'); editBtn.style.display = 'none'; }
+            if (dataForm) { dataForm.classList.remove('hidden'); dataForm.style.setProperty('display', 'block', 'important'); }
+            if (formFooter) { formFooter.classList.remove('hidden'); formFooter.style.setProperty('display', 'block', 'important'); }
+            const counterEl = document.getElementById('session-counter-display');
+            if(counterEl) counterEl.style.display = 'none';
+        }
+        function fillDetailView(item) {
+            document.getElementById('view-date').innerText = item.date ? String(item.date).substring(0, 10) : '-';
+            document.getElementById('view-name').innerText = item.name || '-';
+            document.getElementById('view-location').innerText = `${item.location || '-'} / ${item.dept || '-'}`;
+            document.getElementById('view-qty').innerText = item.qty || '0';
+            const photoContainer = document.getElementById('detail-photos');
+            photoContainer.innerHTML = '';
+            const photos = [item.photo1, item.photo2, item.photo3].filter(Boolean);
+            if (photos.length === 0) {
+                photoContainer.className = "w-full";
+                photoContainer.innerHTML = '<div class="w-full py-8 bg-slate-100 dark:bg-slate-800 rounded-2xl text-center text-slate-400 text-xs font-bold border border-dashed border-slate-300 dark:border-slate-700">写真がありません</div>';
+            } else {
+                let gridClass = "grid gap-2 w-full";
+                if (photos.length === 1) gridClass = "flex justify-center"; 
+                else if (photos.length === 2) gridClass += " grid-cols-2";
+                else gridClass += " grid-cols-3";
+                photoContainer.className = gridClass;
+                photos.forEach(src => {
+                    const img = document.createElement('img');
+                    img.src = src;
+                    let imgClass = "object-cover rounded-xl shadow-sm border-2 border-white dark:border-slate-800 bg-slate-200 aspect-square cursor-pointer";
+                    if(photos.length === 1) imgClass += " w-48 h-48 shadow-md"; else imgClass += " w-full h-auto";
+                    img.className = imgClass;
+                    img.onclick = function() { InputApp.openGallery(item.id); };
+                    photoContainer.appendChild(img);
+                });
+            }
+        }
+        function fillForm(item) {
+            document.getElementById('form-id').value = item.id || "";
+            document.getElementById('form-date').value = item.date ? String(item.date).substring(0, 10) : "";
+            document.getElementById('form-name').value = item.name || "";
+            document.getElementById('form-location').value = item.location || "";
+            document.getElementById('form-qty').value = item.qty || "";
+            document.getElementById('form-email').value = item.email || "";
+            const deptSelect = document.getElementById('form-dept');
+            if (item.dept) {
+                let exists = Array.from(deptSelect.options).some(o => o.value === item.dept);
+                if (!exists) { const opt = document.createElement('option'); opt.value = item.dept; opt.text = item.dept; deptSelect.add(opt); }
+                deptSelect.value = item.dept;
+            }
+            document.getElementById('form-existingPhoto1').value = item.photo1 || "";
+            document.getElementById('form-existingPhoto2').value = item.photo2 || "";
+            document.getElementById('form-existingPhoto3').value = item.photo3 || "";
+            if (item.photo1) setPreview('preview1', 'box-file1', item.photo1, 'btn-draw-file1');
+            if (item.photo2) setPreview('preview2', 'box-file2', item.photo2, 'btn-draw-file2');
+            if (item.photo3) setPreview('preview3', 'box-file3', item.photo3, 'btn-draw-file3');
+        }
+        function closePanel() {
+            const overlay = document.getElementById('form-overlay');
+            const panel = document.getElementById('form-panel');
+            overlay.classList.remove('open');
+            panel.classList.remove('open');
+            setTimeout(() => { overlay.style.display = 'none'; }, 300);
+        }
+
+        function setPreview(imgId, boxId, src, btnId) {
+            const img = document.getElementById(imgId);
+            img.src = src; img.classList.remove('hidden');
+            if(btnId) document.getElementById(btnId).classList.remove('hidden');
+            else if(imgId === 'preview1') document.getElementById('btn-draw-file1').classList.remove('hidden'); 
+        }
+
+        function handleFileSelect(input, imgId, boxId) {
+            if (input.files && input.files[0]) {
+                const file = input.files[0];
+                editedFiles[input.id] = null;
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const fileData = e.target.result;
+                    const img = document.getElementById(imgId);
+                    img.src = fileData; img.classList.remove('hidden');
+                    const btnId = 'btn-draw-' + input.id;
+                    const btn = document.getElementById(btnId);
+                    if(btn) btn.classList.remove('hidden');
+                    else document.getElementById('btn-draw-file1').classList.remove('hidden'); 
+                }
+                reader.readAsDataURL(file);
+            }
+        }
+
+        function setEditedImage(fileId, base64Data) { editedFiles[fileId] = base64Data; }
+
+        function compressImage(file) {
+            return new Promise((resolve, reject) => {
+                const maxWidth = 1024; const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (event) => {
+                    const img = new Image(); img.src = event.target.result;
+                    img.onload = () => {
+                        let width = img.width; let height = img.height;
+                        if (width > maxWidth) { height *= maxWidth / width; width = maxWidth; }
+                        const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+                        const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, width, height);
+                        const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+                        resolve({ name: file.name, mimeType: 'image/jpeg', data: dataUrl.split(',')[1] });
+                    };
+                    img.onerror = reject;
+                };
+                reader.onerror = reject;
+            });
+        }
+
+        // ==========================================
+        // ★ [수정] submitData 함수 (커스텀 알림창 적용)
+        // ==========================================
+        async function submitData() {
+            // 1. 필수 항목 정의
+            const requiredFields = [
+                { id: 'form-date', label: '日付 (Date)' },
+                { id: 'form-name', label: '名前 (Name)' },
+                { id: 'form-location', label: '場所 (Location)' },
+                { id: 'form-qty', label: '数量 (Qty)' }
+            ];
+
+            // 2. 미입력 항목 체크
+            const missing = requiredFields.filter(field => {
+                const el = document.getElementById(field.id);
+                return !el.value || el.value.trim() === "";
+            });
+
+            // 3. 미입력 시 커스텀 팝업 호출
+            if (missing.length > 0) {
+                showCustomAlert(missing);
+                return;
+            }
+            
+            const spinner = document.getElementById('loadingSpinner');
+            if(spinner) spinner.classList.remove('hidden');
+            
+            const form = {
+                id: document.getElementById('form-id').value, date: document.getElementById('form-date').value,
+                name: document.getElementById('form-name').value, dept: document.getElementById('form-dept').value,
+                location: document.getElementById('form-location').value, qty: document.getElementById('form-qty').value,
+                email: document.getElementById('form-email').value, existingPhoto1: document.getElementById('form-existingPhoto1').value,
+                existingPhoto2: document.getElementById('form-existingPhoto2').value, existingPhoto3: document.getElementById('form-existingPhoto3').value
+            };
+            
+            const fileIds = ['file1', 'file2', 'file3'];
+            const filesPromises = fileIds.map(id => {
+                if (editedFiles[id]) return Promise.resolve({ name: "edited_image.jpg", mimeType: "image/jpeg", data: editedFiles[id].split(',')[1] });
+                const input = document.getElementById(id);
+                if (input.files && input.files[0]) return compressImage(input.files[0]);
+                return Promise.resolve(null);
+            });
+
+            try {
+                const files = await Promise.all(filesPromises);
+                google.script.run.withSuccessHandler(res => {
+                    if(spinner) spinner.classList.add('hidden');
+                    if (res && res.success) { 
+                        loadData(); 
+                        if(typeof DashboardApp !== 'undefined' && DashboardApp.init) DashboardApp.init();
+
+                        alert("保存しました"); // 저장 성공 알림
+
+                        const isContinuous = document.getElementById('continuous-mode').checked;
+                        const isEditMode = form.id !== ""; 
+
+                        if (isContinuous && !isEditMode) {
+                            document.getElementById('form-name').value = "";
+                            document.getElementById('form-qty').value = "";
+                            document.getElementById('form-location').value = ""; 
+                            document.getElementById('form-dept').value = ""; 
+                            document.getElementById('form-name').focus(); 
+                            ['preview1', 'preview2', 'preview3'].forEach(pid => document.getElementById(pid).classList.add('hidden'));
+                            ['file1', 'file2', 'file3'].forEach(fid => document.getElementById(fid).value = "");
+                            ['btn-draw-file1', 'btn-draw-file2', 'btn-draw-file3'].forEach(bid => document.getElementById(bid).classList.add('hidden'));
+                            editedFiles = { file1: null, file2: null, file3: null };
+                            sessionUploadCount++;
+                            if(typeof updateCounterDisplay === 'function') updateCounterDisplay();
+                        } else {
+                            InputApp.closePanel(); 
+                        }
+                    }
+                    else { alert("エラー: " + (res ? res.message : "Unknown")); }
+                }).saveInventoryData(form, files);
+            } catch(e) { 
+                if(spinner) spinner.classList.add('hidden'); 
+                alert("エラー: " + e.message); 
+            }
+        }
+
+        // ==========================================
+        // 5. 유틸리티 및 기타 기능
+        // ==========================================
+        function openGallery(target) {
+            let item;
+            if (typeof target === 'string') { 
+                item = globalData.find(i => String(i.id) === String(target)); 
+            } else { 
+                item = target; 
+            }
+
+            if (!item) return;
+
+            const container = document.getElementById('galleryContainer');
+            container.innerHTML = "";
+            
+            const loc = item.location || item.dept || "";
+            const name = item.name || "";
+            
+            if(loc && name) {
+                document.getElementById('galleryTitle').innerText = `${loc} - ${name}`;
+            } else {
+                document.getElementById('galleryTitle').innerText = loc || name || "詳細写真";
+            }
+
+            const p1 = item.photo1 || item['写真1']; const p2 = item.photo2 || item['写真2']; const p3 = item.photo3 || item['写真3'];
+            const photos = [p1, p2, p3];
+            let validCount = 0;
+            document.getElementById('galleryOverlay').style.display = 'flex';
+            document.getElementById('galleryOverlay').classList.remove('hidden');
+            photos.forEach((url, idx) => {
+                if (url && url.includes("drive.google.com")) {
+                    validCount++;
+                    const wrapper = document.createElement('div');
+                    wrapper.className = "w-full bg-slate-900/50 rounded-2xl flex justify-center items-center min-h-[350px] relative shrink-0 snap-center shadow-2xl";
+                    const loader = document.createElement('span');
+                    loader.className = "text-white/50 flex items-center gap-2";
+                    loader.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i> 読み込み中...`;
+                    const img = document.createElement('img');
+                    img.className = "max-w-full max-h-[70vh] rounded-xl shadow-lg object-contain hidden";
+                    wrapper.appendChild(loader); wrapper.appendChild(img); container.appendChild(wrapper);
+                    google.script.run.withSuccessHandler(base64 => {
+                        loader.remove();
+                        if(base64) { img.src = base64; img.classList.remove('hidden'); } else { wrapper.innerHTML = "<span class='text-red-400'>読み込み失敗</span>"; }
+                    }).getPhotoData(url);
+                }
+            });
+            if(validCount === 0) container.innerHTML = "<div class='text-white mt-20 opacity-50'>写真がありません</div>";
+        }
+        function closeGallery(e) {
+            if (e.target.id === 'galleryOverlay' || e.target.closest('button')) {
+                document.getElementById('galleryContainer').innerHTML = "";
+                const overlay = document.getElementById('galleryOverlay');
+                overlay.classList.add('hidden'); overlay.classList.remove('flex');
+            }
+        }
+        function requestDelete(id, event) {
+            if(event) event.stopPropagation(); pendingDeleteId = id;
+            const modal = document.getElementById('delete-modal');
+            modal.classList.remove('hidden');
+            setTimeout(() => { modal.classList.remove('opacity-0'); modal.firstElementChild.classList.remove('scale-95'); modal.firstElementChild.classList.add('scale-100'); }, 10);
+        }
+        function closeDeleteModal() {
+            const modal = document.getElementById('delete-modal');
+            modal.classList.add('opacity-0'); modal.firstElementChild.classList.remove('scale-100'); modal.firstElementChild.classList.add('scale-95');
+            setTimeout(() => { modal.classList.add('hidden'); pendingDeleteId = null; }, 300);
+        }
+        function confirmDelete() {
+            if (!pendingDeleteId) return; const id = pendingDeleteId; closeDeleteModal(); 
+            const spinner = document.getElementById('loadingSpinner');
+            if(spinner) spinner.classList.remove('hidden');
+            google.script.run.withSuccessHandler(res => {
+                if(spinner) spinner.classList.add('hidden');
+                if(res && res.success) {
+                    globalData = globalData.filter(item => String(item.id) !== String(id));
+                    const searchVal = document.getElementById('input-search') ? document.getElementById('input-search').value : "";
+                    if(searchVal) filterList(searchVal); else renderGroupedList(globalData);
+                } else { alert("削除失敗: " + (res ? res.message : "Unknown error")); }
+            }).withFailureHandler(err => { 
+                if(spinner) spinner.classList.add('hidden'); 
+                alert("削除エラー: " + err); 
+            }).deleteItem(id);
+        }
+        function filterList(q) {
+            const lower = q.toLowerCase();
+            const filtered = globalData.filter(i => i.name.toLowerCase().includes(lower) || i.location.toLowerCase().includes(lower));
+            currentRenderCount = 10; 
+            renderGroupedList(filtered);
+        }
+        function openSourceSelect(fileId) { currentTargetFileId = fileId; const overlay = document.getElementById('sourceSelectOverlay'); overlay.classList.remove('hidden'); overlay.classList.add('flex'); setTimeout(()=>overlay.classList.remove('opacity-0'),10); }
+        function closeSourceSelect() { const overlay = document.getElementById('sourceSelectOverlay'); overlay.classList.add('opacity-0'); setTimeout(()=>{ overlay.classList.add('hidden'); overlay.classList.remove('flex'); },300); currentTargetFileId = null; }
+        function confirmSource(type) { if (!currentTargetFileId) return; const input = document.getElementById(currentTargetFileId); if (type === 'camera') input.setAttribute('capture', 'environment'); else input.removeAttribute('capture'); closeSourceSelect(); setTimeout(() => { input.click(); }, 100); }
+        function handleNameInput(input) {
+            const val = input.value.toLowerCase().trim();
+            const listEl = document.getElementById('name-suggestions');
+            if (val.length < 1) { listEl.classList.add('hidden'); return; }
+            const matches = masterData.filter(p => p.name && p.name.toLowerCase().includes(val));
+            if (matches.length === 0) { listEl.classList.add('hidden'); return; }
+            listEl.innerHTML = matches.map(p => `<li class="px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-700 cursor-pointer text-sm text-slate-800 dark:text-slate-200 border-b border-slate-100 dark:border-slate-700 last:border-0" onclick="InputApp.selectName('${p.name}', '${p.email}', '${p.dept}')"><div class="font-bold text-base">${p.name}</div><div class="text-xs text-slate-400 flex justify-between mt-1"><span>${p.dept}</span></div></li>`).join('');
+            listEl.classList.remove('hidden');
+        }
+        function selectName(name, email, dept) {
+            document.getElementById('form-name').value = name;
+            document.getElementById('form-email').value = email;
+            const deptSelect = document.getElementById('form-dept');
+            let optionExists = Array.from(deptSelect.options).some(opt => opt.value === dept);
+            if (!optionExists) { const opt = document.createElement('option'); opt.value = dept; opt.text = dept; deptSelect.add(opt); }
+            deptSelect.value = dept;
+            const autoLocation = calculateLocation(dept);
+            document.getElementById('form-location').value = autoLocation;
+            document.getElementById('name-suggestions').classList.add('hidden');
+        }
+        function calculateLocation(deptName) {
+            if (!deptName) return "";
+            const rules = [
+                { code: "D-A-01", depts: ["樹脂窓SBU_企画G", "樹脂窓SBU_生産設計G", "樹脂窓SBU_樹脂窓商品開発室", "樹脂窓SBU_樹脂窓商品開発室_防火G", "樹脂窓SBU_製造G", "完成品製造部_業務管理G", "完成品製造部_製造G", "完成品製造部_ガラス技術G", "サッシ・ドア営業部_商品工事推進G", "サッシSBU_事業推進G", "サッシSBU_品質G", "サッシ・ドア品質管理部"] },
+                { code: "D-A-02", depts: ["ドアSBU", "ドアSBU_開発1G", "ドアSBU_開発2G", "ドアSBU_未来創造G", "ドアSBU_生産設計G", "ドアSBU_浴室ドア開発G", "ドアSBU_浴室ドア事業推進室_販売企画G", "ドアSBU_特需開発G", "ドアSBU_ドア商品開発室", "ドアSBU_ドア戦略企画室_企画G", "ドアSBU_ドア戦略企画室_製造技術G", "ドアSBU_ドア戦略企画室_戦略G"] },
+                { code: "D-A-03", depts: ["窓まわりSBU_技術開発G", "窓まわりSBU_商品企画G", "窓まわりSBU_業務推進室", "窓まわりSBU_窓まわり開発G", "窓まわりSBU_窓まわり開発G_商品企画G", "窓まわりSBU_窓まわり商品開発室", "窓まわりSBU_窓リフォーム商品開発_企画G", "窓まわりSBU_窓リフォーム商品開発1G", "窓まわりSBU_窓リフォーム商品開発2G", "窓まわりSBU_シャッター開発G"] },
+                { code: "D-A-04", depts: ["サッシSBU_サッシ第2商品開発室_特需SEG", "サッシSBU_サッシ第2商品開発室_特窓第2開発G", "サッシSBU_サッシ第2商品開発室_ドア開発G"] },
+                { code: "D-A-05", depts: ["サッシSBU_サッシ第1商品開発室_引違い開発G", "サッシSBU_サッシ第1商品開発室_特窓第1開発G"] }
+            ];
+            for (const rule of rules) { if (rule.depts.includes(deptName)) return rule.code; }
+            return "";
+        }
+        function startQRScanner() {
+            const overlay = document.getElementById('qr-overlay');
+            const video = document.getElementById('qr-video');
+            if (!overlay || !video) return;
+            overlay.classList.remove('hidden'); overlay.classList.add('flex');
+            isScanning = true;
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+                .then(stream => { videoStream = stream; video.srcObject = stream; video.setAttribute("playsinline", true); video.play(); requestAnimationFrame(scanTick); })
+                .catch(err => { alert("カメラ起動エラー: " + err); stopQRScanner(); });
+        }
+        function scanTick() {
+            if (!isScanning) return;
+            const video = document.getElementById('qr-video');
+            const canvas = document.getElementById('qr-canvas');
+            if (!video || !canvas) return;
+            const context = canvas.getContext('2d');
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                canvas.height = video.videoHeight; canvas.width = video.videoWidth;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+                if(typeof jsQR !== 'undefined') {
+                    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
+                    if (code) { document.getElementById('form-location').value = code.data; stopQRScanner(); return; }
+                }
+            }
+            requestAnimationFrame(scanTick);
+        }
+        function stopQRScanner() {
+            isScanning = false;
+            const overlay = document.getElementById('qr-overlay');
+            if (overlay) { overlay.classList.add('hidden'); overlay.classList.remove('flex'); }
+            if (videoStream) { videoStream.getTracks().forEach(track => track.stop()); videoStream = null; }
+        }
+
+        // ==========================================
+        // ★★★ [업그레이드] 도형 & Undo 지원 드로잉 모듈 ★★★
+        // ==========================================
+        function openDrawing(fileId, event) {
+            if(event) event.stopPropagation();
+            const previewId = 'preview' + fileId.replace('file', '');
+            const previewImg = document.getElementById(previewId);
+            
+            if (!previewImg || !previewImg.src || previewImg.classList.contains('hidden') || previewImg.src === "") {
+                alert("編集する写真がありません");
+                return;
+            }
+
+            currentDrawingFileId = fileId;
+            const spinner = document.getElementById('loadingSpinner');
+
+            if (previewImg.src.startsWith('data:')) {
+                initDrawingCanvas(previewImg.src);
+            } else {
+                if(spinner) spinner.classList.remove('hidden');
+                google.script.run.withSuccessHandler(base64 => {
+                    if(spinner) spinner.classList.add('hidden');
+                    if (base64) {
+                        previewImg.src = base64; 
+                        initDrawingCanvas(base64);
+                    } else {
+                        alert("画像の読み込みに失敗しました。");
+                    }
+                }).withFailureHandler(err => {
+                    if(spinner) spinner.classList.add('hidden');
+                    alert("画像エラー: " + err);
+                }).getPhotoData(previewImg.src);
+            }
+        }
+
+        function initDrawingCanvas(src) {
+            const overlay = document.getElementById('drawingOverlay');
+            canvas = document.getElementById('drawCanvas');
+            ctx = canvas.getContext('2d');
+            
+            overlay.classList.remove('hidden'); 
+            overlay.classList.add('flex');
+            
+            // 캔버스 초기화 시 히스토리 리셋
+            history = [];
+
+            drawingImg.onload = () => {
+                canvas.width = drawingImg.width;
+                canvas.height = drawingImg.height;
+                ctx.drawImage(drawingImg, 0, 0);
+                setTool('pen');
+                setPenColor('red');
+            };
+            drawingImg.src = src;
+            setupDrawingEvents();
+        }
+
+        function closeDrawing() {
+            const overlay = document.getElementById('drawingOverlay');
+            overlay.classList.add('hidden'); overlay.classList.remove('flex');
+            currentDrawingFileId = null;
+        }
+
+        function setupDrawingEvents() {
+            canvas.onmousedown = startDraw;
+            canvas.ontouchstart = startDraw;
+            canvas.onmousemove = draw;
+            canvas.ontouchmove = draw;
+            canvas.onmouseup = stopDraw;
+            canvas.ontouchend = stopDraw;
+        }
+
+        function startDraw(e) {
+            isDrawing = true;
+            
+            // ★ 그리기 시작 전, 현재 상태를 히스토리에 저장 (Undo용)
+            history.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+
+            ctx.beginPath();
+            const pos = getPos(e);
+            startX = pos.x;
+            startY = pos.y;
+            if (currentTool === 'pen') {
+                ctx.moveTo(startX, startY);
+            } else {
+                snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            }
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            e.preventDefault(); 
+            const pos = getPos(e);
+            if (currentTool === 'pen') {
+                ctx.lineWidth = Math.max(5, canvas.width / 150);
+                ctx.lineCap = 'round';
+                ctx.lineTo(pos.x, pos.y);
+                ctx.stroke();
+            } else {
+                ctx.putImageData(snapshot, 0, 0);
+                ctx.lineWidth = Math.max(8, canvas.width / 100); 
+                ctx.beginPath();
+                if (currentTool === 'rect') {
+                    const w = pos.x - startX; const h = pos.y - startY;
+                    ctx.strokeRect(startX, startY, w, h);
+                } else if (currentTool === 'circle') {
+                    // ★ 타원 그리기 (사각형처럼 드래그)
+                    const centerX = startX + (pos.x - startX) / 2;
+                    const centerY = startY + (pos.y - startY) / 2;
+                    const radiusX = Math.abs(pos.x - startX) / 2;
+                    const radiusY = Math.abs(pos.y - startY) / 2;
+                    
+                    ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, 2 * Math.PI);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function stopDraw() { isDrawing = false; }
+
+        // ★ Undo (실행 취소) 함수
+        function undoDrawing() {
+            if (history.length > 0) {
+                const lastState = history.pop();
+                ctx.putImageData(lastState, 0, 0);
+            }
+        }
+
+        function getPos(e) {
+            const rect = canvas.getBoundingClientRect();
+            let clientX, clientY;
+            if (e.touches && e.touches.length > 0) { clientX = e.touches[0].clientX; clientY = e.touches[0].clientY; }
+            else { clientX = e.clientX; clientY = e.clientY; }
+            return { x: (clientX - rect.left) * (canvas.width / rect.width), y: (clientY - rect.top) * (canvas.height / rect.height) };
+        }
+
+        function setTool(tool) {
+            currentTool = tool;
+            ['tool-pen', 'tool-rect', 'tool-circle'].forEach(id => {
+                const btn = document.getElementById(id);
+                btn.classList.remove('bg-slate-700', 'text-white', 'ring-2', 'ring-blue-500');
+                btn.classList.add('bg-slate-800', 'text-slate-400');
+            });
+            const activeBtn = document.getElementById('tool-' + tool);
+            activeBtn.classList.remove('bg-slate-800', 'text-slate-400');
+            activeBtn.classList.add('bg-slate-700', 'text-white', 'ring-2', 'ring-blue-500');
+        }
+
+        function setPenColor(color) {
+            const redBtn = document.getElementById('color-red');
+            const yellowBtn = document.getElementById('color-yellow');
+            redBtn.classList.remove('ring-2', 'ring-red-500/50', 'opacity-50');
+            yellowBtn.classList.remove('ring-2', 'ring-yellow-400/50', 'opacity-50');
+            if(color === 'red') {
+                ctx.strokeStyle = '#EF4444';
+                redBtn.classList.add('ring-2', 'ring-red-500/50');
+                yellowBtn.classList.add('opacity-50');
+            } else if(color === 'yellow') {
+                ctx.strokeStyle = '#FACC15';
+                yellowBtn.classList.add('ring-2', 'ring-yellow-400/50');
+                redBtn.classList.add('opacity-50');
+            }
+        }
+        
+        function clearCanvas() {
+            history.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(drawingImg, 0, 0);
+        }
+
+        function saveDrawing() {
+            if (!currentDrawingFileId) return;
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+            const previewId = 'preview' + currentDrawingFileId.replace('file', '');
+            document.getElementById(previewId).src = dataUrl;
+            editedFiles[currentDrawingFileId] = dataUrl;
+            closeDrawing();
+        }
+        
+
+        return {
+            init, loadData, filterList, openPanel, closePanel, 
+            submitData, openGallery, closeGallery, 
+            handleNameInput, selectName, isLoaded,
+            handleFileSelect, setEditedImage,
+            openSourceSelect, closeSourceSelect, confirmSource,
+            requestDelete, confirmDelete, closeDeleteModal,
+            enableEditMode, startQRScanner, stopQRScanner,
+            loadMoreItems,
+            openDrawing, closeDrawing, saveDrawing, setPenColor, clearCanvas, setTool, undoDrawing,
+            showCustomAlert, closeCustomAlert // ★ 새로 추가된 함수 export
+        };
+    })();
+</script>
