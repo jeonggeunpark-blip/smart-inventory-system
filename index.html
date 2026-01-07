@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="ja" class="antialiased">
+<head>
+    <meta charset="UTF-8">
+    <title>在庫管理システム</title>
+    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#0f172a">
+
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="在庫管理">
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+    
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'Noto Sans JP', 'sans-serif'] },
+                    animation: { 'fade-in': 'fadeIn 0.3s ease-out' },
+                    keyframes: { fadeIn: { '0%': { opacity: '0', transform: 'translateY(10px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } } }
+                }
+            }
+        }
+    </script>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;900&family=Noto+Sans+JP:wght@400;700;900&family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+    <?!= include('CSS'); ?>
+    
+    <style>
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        body { -webkit-tap-highlight-color: transparent; }
+    </style>
+</head>
+
+<body class="bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-sans antialiased selection:bg-blue-500 selection:text-white overflow-x-hidden">
+
+    <div id="intro-screen">
+        <canvas id="intro-canvas"></canvas>
+        <div class="intro-content">
+            <h1 class="intro-title">在庫管理システム</h1>
+            <p class="intro-sub">System Initializing...</p>
+            <div class="intro-loader"></div>
+        </div>
+    </div>
+
+    <div id="loadingSpinner" class="fixed inset-0 bg-black/20 z-[9999] hidden flex items-center justify-center backdrop-blur-sm transition-opacity">
+        <div class="bg-white dark:bg-slate-800 p-5 rounded-2xl shadow-2xl flex flex-col items-center gap-3">
+            <i class="ph-bold ph-spinner animate-spin text-4xl text-blue-500"></i>
+            <span class="text-xs font-bold text-slate-500 dark:text-slate-400">処理中...</span>
+        </div>
+    </div>
+
+    <div id="delete-modal" class="fixed inset-0 z-[10000] hidden flex items-center justify-center bg-black/40 backdrop-blur-sm transition-opacity opacity-0">
+        <div class="bg-white dark:bg-slate-800 w-[90%] max-w-sm rounded-3xl p-6 shadow-2xl transform scale-95 transition-all">
+            <div class="flex flex-col items-center text-center">
+                <div class="w-14 h-14 rounded-full bg-red-100 dark:bg-red-900/30 text-red-500 flex items-center justify-center mb-4">
+                    <i class="ph-fill ph-trash text-2xl"></i>
+                </div>
+                <h3 class="text-lg font-bold text-slate-900 dark:text-white mb-2">削除しますか？</h3>
+                <p class="text-sm text-slate-500 dark:text-slate-400 mb-6">この操作は取り消せません。<br>本当に削除しますか？</p>
+                <div class="flex gap-3 w-full">
+                    <button onclick="InputApp.closeDeleteModal()" class="flex-1 py-3 rounded-xl font-bold text-slate-500 bg-slate-100 dark:bg-slate-700 dark:text-slate-300 hover:bg-slate-200 transition-colors">キャンセル</button>
+                    <button onclick="InputApp.confirmDelete()" class="flex-1 py-3 rounded-xl font-bold text-white bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/30 transition-transform active:scale-95">削除する</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <main id="main-content" class="w-full h-full min-h-screen relative">
+
+        <div id="view-menu" class="hidden fixed inset-0 w-full h-screen bg-[#F8FAFC] dark:bg-[#020617] transition-colors duration-300 z-50 flex flex-col items-center justify-center overflow-hidden">
+            
+            <div class="text-center mb-10 scale-100 origin-bottom">
+                <div class="w-20 h-20 bg-gradient-to-tr from-blue-500 to-indigo-600 rounded-3xl flex items-center justify-center text-white shadow-xl shadow-blue-500/30 mx-auto mb-6">
+                    <i class="ph-fill ph-cube text-4xl"></i>
+                </div>
+                <h2 class="text-2xl font-black text-slate-900 dark:text-white mb-2">在庫管理システム</h2>
+                <p class="text-slate-400 font-medium">C様 2階 Dゾーン</p>
+            </div>
+
+            <div class="grid grid-cols-1 gap-5 w-full max-w-sm px-6">
+                
+                <button onclick="AppRouter.switch('dashboard')" class="group relative bg-white dark:bg-slate-800 p-6 rounded-[2rem] border border-slate-100 dark:border-slate-700 shadow-xl shadow-slate-200/50 dark:shadow-none flex items-center gap-5 transition-all hover:scale-[1.02] active:scale-95 text-left cursor-pointer">
+                    <div class="w-14 h-14 rounded-2xl bg-blue-50 dark:bg-blue-900/30 text-blue-500 flex items-center justify-center shrink-0 group-hover:bg-blue-500 group-hover:text-white transition-colors">
+                        <i class="ph-fill ph-chart-bar text-2xl"></i>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <h3 class="text-lg font-bold text-slate-800 dark:text-white group-hover:text-blue-500 transition-colors">ダッシュボード</h3>
+                        <p class="text-xs text-slate-400 mt-1">在庫状況・統計を確認</p>
+                    </div>
+                    <i class="ph-bold ph-caret-right text-xl text-slate-300 group-hover:text-blue-500 transition-colors"></i>
+                </button>
+
+                <button onclick="AppRouter.switch('input')" class="group relative bg-white dark:bg-slate-800 p-6 rounded-[2rem] border border-slate-100 dark:border-slate-700 shadow-xl shadow-slate-200/50 dark:shadow-none flex items-center gap-5 transition-all hover:scale-[1.02] active:scale-95 text-left cursor-pointer">
+                    <div class="w-14 h-14 rounded-2xl bg-emerald-50 dark:bg-emerald-900/30 text-emerald-500 flex items-center justify-center shrink-0 group-hover:bg-emerald-500 group-hover:text-white transition-colors">
+                        <i class="ph-fill ph-clipboard-text text-2xl"></i>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <h3 class="text-lg font-bold text-slate-800 dark:text-white group-hover:text-emerald-500 transition-colors">データ入力</h3>
+                        <p class="text-xs text-slate-400 mt-1">新規登録・編集・削除</p>
+                    </div>
+                    <i class="ph-bold ph-caret-right text-xl text-slate-300 group-hover:text-emerald-500 transition-colors"></i>
+                </button>
+
+            </div>
+            
+            <p class="absolute bottom-8 text-[10px] text-slate-300 dark:text-slate-700 font-bold tracking-widest uppercase">System v1.2</p>
+        </div>
+        
+        <div id="view-dashboard" class="w-full pb-24 hidden px-4 md:px-6 pt-6 max-w-[1400px] mx-auto">
+            
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <h2 class="text-2xl font-black text-slate-900 dark:text-white">Dashboard</h2>
+                    <p class="text-xs text-slate-400 font-bold">在庫状況・統計</p>
+                </div>
+                <div class="flex items-center gap-3">
+                     <select id="langSwitcher" class="text-xs bg-transparent font-bold text-slate-400 outline-none cursor-pointer">
+                        <option value="ja">JP</option>
+                        <option value="en">EN</option>
+                    </select>
+                    <button onclick="window.ThemeManager.toggle()" class="w-9 h-9 rounded-full bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 shadow-sm flex items-center justify-center text-slate-500 dark:text-slate-400">
+                        <i class="ph-bold ph-moon-stars"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex flex-col md:flex-row gap-3 mb-6 w-full animate-fade-in">
+                <div class="flex items-center gap-2 w-full md:flex-1 min-w-0">
+                    <div class="flex items-center gap-2 shrink-0">
+                        <span class="text-sm font-bold text-slate-500 dark:text-slate-400 whitespace-nowrap">提出日</span>
+                        <div class="relative">
+                            <select id="monthFilter" class="h-11 bg-white dark:bg-slate-800 border border-transparent text-slate-800 dark:text-white text-sm font-bold rounded-xl pl-3 pr-8 outline-none focus:ring-2 focus:ring-blue-500 shadow-sm appearance-none transition-all cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700 min-w-[110px]"></select>
+                            <i class="ph-bold ph-caret-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none"></i>
+                        </div>
+                    </div>
+                    <div class="relative flex-1 min-w-0">
+                        <i class="ph-bold ph-magnifying-glass absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+                        <input type="search" id="searchFilter" class="w-full h-11 bg-white dark:bg-slate-800 border border-transparent text-slate-800 dark:text-white rounded-xl pl-11 pr-4 outline-none focus:ring-2 focus:ring-blue-500 shadow-sm transition-all font-medium text-sm placeholder:text-slate-400 truncate" placeholder="キーワード検索...">
+                    </div>
+                </div>
+                <div class="flex items-center justify-between md:justify-end gap-2 w-full md:w-auto shrink-0">
+                    <div class="flex items-center bg-white dark:bg-slate-800 rounded-xl px-3 h-11 shadow-sm border border-transparent hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors shrink-0" title="在庫警告の閾値設定">
+                        <span class="text-slate-400 mr-1.5"><i class="ph-fill ph-warning-circle text-lg"></i></span>
+                        <span class="text-[11px] font-bold text-slate-500 dark:text-slate-400 mr-2 whitespace-nowrap">警告数</span>
+                        <input type="number" id="warningThreshold" value="20" min="1" class="w-10 bg-transparent text-center font-bold text-slate-800 dark:text-white outline-none text-sm appearance-none p-0">
+                    </div>
+                    <input type="number" id="warningThresholdMobile" value="20" class="hidden">
+                    <div class="flex items-center gap-2">
+                        <button id="reloadButton" class="flex items-center justify-center gap-1.5 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-3 h-11 rounded-xl border border-transparent shadow-sm font-bold text-sm whitespace-nowrap active:scale-95 transition-transform hover:text-blue-500 hover:bg-slate-50 dark:hover:bg-slate-700">
+                            <i class="ph-bold ph-arrow-clockwise text-lg"></i>
+                            <span>更新</span>
+                        </button>
+                        <button id="exportCsvButton" class="flex items-center justify-center gap-1.5 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-3 h-11 rounded-xl border border-transparent shadow-sm font-bold text-sm whitespace-nowrap active:scale-95 transition-transform hover:text-green-500 hover:bg-slate-50 dark:hover:bg-slate-700">
+                            <i class="ph-bold ph-file-csv text-lg"></i>
+                            <span>CSV</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
+                <div class="flex flex-col gap-5 md:col-span-3">
+                    <div>
+                        <h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2 select-none" data-i18n="kpiTitle">概要</h2>
+                        <div id="kpiGrid" class="grid grid-cols-2 gap-2"></div>
+                    </div>
+                    <div class="card-base p-4 bg-gradient-to-br from-white to-slate-50 dark:from-slate-800 dark:to-slate-800/50 flex flex-col justify-center min-h-[140px]">
+                        <h2 class="text-xs font-bold text-slate-800 dark:text-white mb-2 flex items-center gap-2" data-i18n="summaryTitle"><i class="ph-duotone ph-clipboard-text text-primary"></i> サマリー</h2>
+                        <ul id="summaryList" class="space-y-1.5 text-xs text-slate-600 dark:text-slate-400"></ul>
+                    </div>
+                    <div class="card-base flex flex-col border-l-4 border-red-500 overflow-hidden min-h-[160px]" id="warningContainer" style="display: none;">
+                        <div class="p-3 bg-red-50 dark:bg-red-900/10 flex justify-between items-center shrink-0">
+                            <h2 class="text-xs font-bold text-red-600 dark:text-red-400 flex items-center gap-2"><i class="ph-fill ph-warning-circle"></i> <span data-i18n="warningTitle">警告</span></h2>
+                            <span class="text-[10px] bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-300 px-2 py-0.5 rounded-full font-bold shadow-sm">在庫超過</span>
+                        </div>
+                        <div class="overflow-y-auto max-h-[200px]">
+                            <table class="w-full text-left">
+                                <thead class="bg-red-50/50 dark:bg-red-900/10 text-red-900 dark:text-red-300 text-[10px] font-bold sticky top-0 z-10"><tr id="warningTableHeader"></tr></thead>
+                                <tbody id="warningTableBody" class="text-xs divide-y divide-red-50 dark:divide-red-900/20"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex flex-col gap-5 md:col-span-5">
+                    <div class="card-base p-4 h-64 flex flex-col">
+                        <div class="flex justify-between items-center mb-1 shrink-0 select-none">
+                            <h2 id="comparisonChartTitle" class="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2" data-i18n="comparisonChartTitle">トレンド</h2>
+                        </div>
+                        <div class="flex-grow w-full min-h-0 relative"><canvas id="comparisonChart" class="lazy-chart"></canvas></div>
+                    </div>
+                    <div class="card-base p-4 h-64 flex flex-col">
+                        <div class="flex justify-between items-center mb-1 shrink-0 select-none">
+                            <h2 id="deptChartTitle" class="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2" data-i18n="deptChartTitle">部署別</h2>
+                        </div>
+                        <div class="flex-grow w-full min-h-0 relative"><canvas id="departmentChart" class="lazy-chart"></canvas></div>
+                    </div>
+                </div>
+                <div class="flex flex-col md:col-span-4 h-full">
+                    <div class="card-base flex flex-col bg-transparent shadow-none border-none md:bg-white md:dark:bg-slate-800 md:shadow-soft md:border md:border-slate-100 md:dark:border-slate-700 h-auto">
+                        <div class="p-3 border-b border-transparent md:border-slate-100 md:dark:border-slate-700 shrink-0 flex justify-between items-center select-none">
+                            <h2 class="text-sm font-bold text-slate-500 md:text-slate-800 md:dark:text-white uppercase tracking-wider md:normal-case flex items-center gap-2" data-i18n="detailsTitle"><i class="hidden md:inline ph-duotone ph-list-dashes text-primary"></i> 詳細</h2>
+                            <select id="locationFilter" class="hidden"></select>
+                        </div>
+                        <div id="dataCardsContainer" class="flex-grow min-h-0"></div>
+                        <div id="loadMoreContainer" class="p-2 text-center shrink-0 hidden">
+                            <button id="loadMoreBtn" class="text-xs font-bold text-blue-500 py-2 w-full bg-white dark:bg-slate-800 rounded-lg shadow-sm" data-i18n="loadMore">もっと見る</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="submissionDate" class="hidden"></div>
+        </div>
+
+        <div id="view-input" class="w-full hidden pb-24 px-4 md:px-6 pt-6 max-w-[1400px] mx-auto">
+            
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <h2 class="text-2xl font-black text-slate-900 dark:text-white">Data Input</h2>
+                    <p class="text-xs text-slate-400 font-bold">データ登録</p>
+                </div>
+                <button onclick="window.ThemeManager.toggle()" class="w-9 h-9 rounded-full bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 shadow-sm flex items-center justify-center text-slate-500 dark:text-slate-400">
+                    <i class="ph-bold ph-moon-stars"></i>
+                </button>
+            </div>
+
+            <div class="sticky top-0 z-20 bg-[#F2F4F6] dark:bg-[#111827] pb-2 px-1 transition-colors">
+                <div class="relative bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 h-14 flex items-center justify-between overflow-hidden px-4">
+                    <div id="input-title-group" class="flex items-center gap-2 transition-all duration-300">
+                        <h2 class="text-lg font-bold text-slate-800 dark:text-white tracking-tight">登録一覧</h2>
+                        <span class="text-xs font-bold text-slate-400 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded-full">List</span>
+                    </div>
+                    <button onclick="toggleSearch('input', true)" class="w-10 h-10 flex items-center justify-center rounded-xl text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors">
+                        <i class="ph-bold ph-magnifying-glass text-xl"></i>
+                    </button>
+                    <div id="input-search-bar" class="absolute inset-0 bg-white dark:bg-slate-800 flex items-center px-2 translate-x-full transition-transform duration-300 ease-in-out z-10">
+                        <i class="ph-bold ph-magnifying-glass text-slate-400 ml-2"></i>
+                        <input type="text" id="input-search" class="flex-1 bg-transparent border-none outline-none text-base h-full px-2 text-slate-800 dark:text-white placeholder:text-slate-400 font-medium" placeholder="名前、場所で検索..." onkeyup="InputApp.filterList(this.value)">
+                        <button onclick="toggleSearch('input', false)" class="w-9 h-9 flex items-center justify-center rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500">
+                            <i class="ph-bold ph-x"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div id="input-list-container" class="space-y-4 pt-2"></div>
+            <button onclick="InputApp.openPanel('create')" class="fixed bottom-24 right-6 w-14 h-14 rounded-full bg-slate-700 hover:bg-slate-600 text-white shadow-xl shadow-slate-700/40 flex items-center justify-center active:scale-90 transition-transform z-30">
+                <i class="ph-bold ph-plus text-2xl"></i>
+            </button>
+        </div>
+
+    </main>
+
+   <nav class="bottom-nav fixed bottom-6 left-1/2 -translate-x-1/2 w-[320px] bg-white dark:bg-slate-800 p-2 rounded-[2.5rem] shadow-xl shadow-slate-200/50 dark:shadow-black/50 border border-slate-100 dark:border-slate-700 z-50 flex justify-between items-center" style="display: none;">
+    
+    <button id="nav-dash" onclick="AppRouter.switch('dashboard')" class="nav-item flex-1 py-3 rounded-[2rem] flex flex-col items-center justify-center gap-0.5 text-slate-400 transition-all duration-300 group-[.active]:bg-slate-100 dark:group-[.active]:bg-slate-700 group-[.active]:text-slate-900 dark:group-[.active]:text-white group-[.active]:shadow-sm">
+        <i class="ph-fill ph-chart-bar text-2xl mb-0.5"></i>
+        <span class="text-[10px] font-bold">ダッシュボード</span>
+    </button>
+
+    <button id="nav-input" onclick="AppRouter.switch('input')" class="nav-item flex-1 py-3 rounded-[2rem] flex flex-col items-center justify-center gap-0.5 text-slate-400 transition-all duration-300 group-[.active]:bg-slate-100 dark:group-[.active]:bg-slate-700 group-[.active]:text-slate-900 dark:group-[.active]:text-white group-[.active]:shadow-sm">
+        <i class="ph-fill ph-clipboard-text text-2xl mb-0.5"></i>
+        <span class="text-[10px] font-bold">入力</span>
+    </button>
+
+</nav>
+
+    <div id="form-overlay" class="overlay" onclick="InputApp.closePanel(); DashboardApp.closeLocationDetail();"></div>
+    <aside id="form-panel" class="slide-panel rounded-2xl">
+        <div class="flex justify-between items-center px-6 py-4 md:py-6 border-b border-slate-100 dark:border-slate-800">
+            <h3 id="panel-title" class="text-xl font-bold text-slate-900 dark:text-white tracking-tight text-center flex-1 ml-8">詳細情報</h3>
+            <div class="flex items-center gap-2">
+                <button id="btn-edit-mode" onclick="InputApp.enableEditMode()" class="hidden w-9 h-9 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-600 dark:text-slate-300">
+                    <i class="ph-bold ph-pencil-simple text-xl"></i>
+                </button>
+                <button onclick="InputApp.closePanel()" class="w-9 h-9 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500 dark:text-slate-400">
+                    <i class="ph-bold ph-x"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto px-6 py-4">
+            <div id="detail-view" class="space-y-6 animate-fade-in">
+                <div id="detail-photos" class="w-full"></div>
+                
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
+                        <span class="block text-[10px] text-slate-400 font-bold uppercase mb-1">日付</span>
+                        <span id="view-date" class="font-bold text-slate-800 dark:text-white text-sm"></span>
+                    </div>
+                    <div class="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl">
+                        <span class="block text-[10px] text-slate-400 font-bold uppercase mb-1">数量</span>
+                        <div class="flex items-baseline gap-1">
+                            <span id="view-qty" class="font-black text-blue-600 dark:text-blue-400 text-xl"></span>
+                            <span class="text-[10px] text-slate-400 font-bold">個</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="space-y-4">
+                    <div class="p-4 bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-sm">
+                        <span class="block text-[10px] text-slate-400 font-bold uppercase mb-1">名前</span>
+                        <p id="view-name" class="text-base font-bold text-slate-900 dark:text-white"></p>
+                    </div>
+                    <div class="p-4 bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-sm">
+                        <span class="block text-[10px] text-slate-400 font-bold uppercase mb-1">部署 / 置き場</span>
+                        <p id="view-location" class="text-sm font-medium text-slate-600 dark:text-slate-300"></p>
+                    </div>
+                </div>
+            </div>
+
+            <form id="dataForm" class="hidden flex flex-col h-full pb-60">
+                <input type="hidden" id="form-id">
+                <input type="hidden" id="form-email">
+                <input type="hidden" id="form-existingPhoto1"><input type="hidden" id="form-existingPhoto2"><input type="hidden" id="form-existingPhoto3">
+                <div class="space-y-4">
+                    <div class="grid grid-cols-3 gap-3">
+                        <div class="aspect-square rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors relative overflow-hidden group" id="box-file1" onclick="InputApp.openSourceSelect('file1')">
+                            <i class="ph-bold ph-camera text-2xl text-slate-300 group-hover:text-blue-500 transition-colors"></i>
+                            <img id="preview1" class="absolute inset-0 w-full h-full object-cover hidden">
+                            <input type="file" id="file1" accept="image/*" class="hidden" onchange="InputApp.handleFileSelect(this, 'preview1', 'box-file1')">
+                            <button type="button" id="btn-draw-file1" onclick="InputApp.openDrawing('file1', event)" class="absolute bottom-1 right-1 w-8 h-8 bg-black/60 text-white rounded-full hidden items-center justify-center z-10 backdrop-blur-sm active:scale-90 transition-transform">
+                                <i class="ph-bold ph-pencil-simple text-sm"></i>
+                            </button>
+                        </div>
+                        <div class="aspect-square rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors relative overflow-hidden group" id="box-file2" onclick="InputApp.openSourceSelect('file2')">
+                            <i class="ph-bold ph-plus text-2xl text-slate-300 group-hover:text-blue-500 transition-colors"></i>
+                            <img id="preview2" class="absolute inset-0 w-full h-full object-cover hidden">
+                            <input type="file" id="file2" accept="image/*" class="hidden" onchange="InputApp.handleFileSelect(this, 'preview2', 'box-file2')">
+                            <button type="button" id="btn-draw-file2" onclick="InputApp.openDrawing('file2', event)" class="absolute bottom-1 right-1 w-8 h-8 bg-black/60 text-white rounded-full hidden items-center justify-center z-10 backdrop-blur-sm active:scale-90 transition-transform">
+                                <i class="ph-bold ph-pencil-simple text-sm"></i>
+                            </button>
+                        </div>
+                        <div class="aspect-square rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors relative overflow-hidden group" id="box-file3" onclick="InputApp.openSourceSelect('file3')">
+                            <i class="ph-bold ph-plus text-2xl text-slate-300 group-hover:text-blue-500 transition-colors"></i>
+                            <img id="preview3" class="absolute inset-0 w-full h-full object-cover hidden">
+                            <input type="file" id="file3" accept="image/*" class="hidden" onchange="InputApp.handleFileSelect(this, 'preview3', 'box-file3')">
+                            <button type="button" id="btn-draw-file3" onclick="InputApp.openDrawing('file3', event)" class="absolute bottom-1 right-1 w-8 h-8 bg-black/60 text-white rounded-full hidden items-center justify-center z-10 backdrop-blur-sm active:scale-90 transition-transform">
+                                <i class="ph-bold ph-pencil-simple text-sm"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl focus-within:ring-2 focus-within:ring-blue-500 transition-shadow">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">日付</label>
+                            <input type="date" id="form-date" lang="ja" class="w-full bg-transparent border-none p-0 outline-none font-bold text-slate-800 dark:text-white text-sm h-6">
+                        </div>
+                        <div class="bg-slate-50 dark:bg-slate-800/50 p-4 rounded-2xl focus-within:ring-2 focus-within:ring-blue-500 transition-shadow relative">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">数量</label>
+                            <div class="flex items-baseline gap-1">
+                                <input type="number" id="form-qty" class="w-full bg-transparent border-none p-0 outline-none font-black text-blue-600 dark:text-blue-400 text-xl h-7" placeholder="0">
+                                <span class="text-[10px] text-slate-400 font-bold absolute right-4 bottom-4 pointer-events-none">個</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="p-4 bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-sm focus-within:ring-2 focus-within:ring-blue-500 transition-shadow relative">
+                        <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1">名前</label>
+                        <input type="text" id="form-name" class="w-full bg-transparent border-none p-0 outline-none font-bold text-lg text-slate-900 dark:text-white placeholder:text-slate-300" placeholder="名前を入力" autocomplete="off" onkeyup="InputApp.handleNameInput(this)">
+                        <ul id="name-suggestions" class="hidden absolute left-0 top-full z-50 w-full bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 rounded-xl shadow-xl max-h-48 overflow-y-auto mt-2 p-2"></ul>
+                    </div>
+                    <div class="p-4 bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-sm focus-within:ring-2 focus-within:ring-blue-500 transition-shadow">
+                        <label class="block text-[10px] font-bold text-slate-400 uppercase mb-2">部署 / 置き場</label>
+                        <div class="flex flex-col gap-2">
+                            <div class="relative">
+                                <select id="form-dept" class="w-full bg-slate-50 dark:bg-slate-800 border-none rounded-xl py-2 px-3 outline-none font-bold text-sm text-slate-700 dark:text-white appearance-none">
+                                    <option value="">部署を選択</option>
+                                </select>
+                                <i class="ph-bold ph-caret-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs pointer-events-none"></i>
+                            </div>
+                            <div class="flex gap-2">
+                                <input type="text" id="form-location" class="flex-1 bg-slate-50 dark:bg-slate-800 border-none rounded-xl py-2 px-3 outline-none font-medium text-sm text-slate-700 dark:text-white placeholder:text-slate-400" placeholder="置き場 (例: A-1)">
+                                <button type="button" onclick="InputApp.startQRScanner()" class="bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 w-10 h-10 rounded-xl flex items-center justify-center shrink-0 active:scale-95 transition-transform">
+                                    <i class="ph-bold ph-qr-code text-xl"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <div id="form-footer" class="hidden p-6 pt-2 pb-8 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800">
+            <div class="flex items-center justify-between mb-4">
+                <span id="session-counter-display" class="text-xs font-bold text-blue-500 bg-blue-50 dark:bg-blue-900/20 px-2 py-1 rounded hidden">
+                    今回: 0件
+                </span>
+                <label class="flex items-center gap-2 cursor-pointer select-none">
+                    <input type="checkbox" id="continuous-mode" class="w-5 h-5 rounded border-slate-300 text-slate-600 focus:ring-slate-500">
+                    <span class="text-sm font-bold text-slate-500 dark:text-slate-400">続けて登録する</span>
+                </label>
+            </div>
+            <button onclick="InputApp.submitData()" class="w-full py-4 rounded-2xl font-bold text-white text-base bg-slate-700 hover:bg-slate-600 shadow-lg shadow-slate-700/30 active:scale-95 transition-all">
+                変更内容を保存
+            </button>
+        </div>
+    </aside>
+
+    <aside id="dashboard-panel" class="slide-panel rounded-2xl">
+        <div class="flex justify-between items-center px-6 py-4 border-b border-slate-100 dark:border-slate-700">
+            <h3 id="dash-panel-title" class="text-lg font-bold text-slate-900 dark:text-white truncate pr-4">Location</h3>
+            <button onclick="DashboardApp.closeLocationDetail()" class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center text-slate-500 dark:text-slate-400">
+                <i class="ph-bold ph-x"></i>
+            </button>
+        </div>
+        <div id="dash-panel-content" class="flex-1 overflow-y-auto p-4 space-y-2"></div>
+    </aside>
+
+    <div id="galleryOverlay" class="fixed inset-0 bg-black z-[3000] hidden flex-col justify-center animate-fade-in" onclick="InputApp.closeGallery(event)">
+        <div class="absolute top-0 w-full p-4 flex justify-between items-center z-50 bg-gradient-to-b from-black/80 to-transparent">
+            <div class="text-white font-bold truncate pr-4" id="galleryTitle">Photo</div>
+            <button class="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center text-white backdrop-blur">
+                <i class="ph-bold ph-x text-lg"></i>
+            </button>
+        </div>
+        <div id="galleryContainer" class="w-full h-full overflow-y-auto flex flex-col items-center gap-4 p-4 py-20 snap-y snap-mandatory"></div>
+    </div>
+
+    <div id="sourceSelectOverlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[5000] hidden flex-col justify-end transition-opacity" onclick="InputApp.closeSourceSelect()">
+        <div class="bg-white dark:bg-slate-800 w-full rounded-t-3xl p-6 pb-10 transform transition-transform" onclick="event.stopPropagation()">
+            <div class="w-12 h-1 bg-slate-200 dark:bg-slate-600 rounded-full mx-auto mb-6"></div>
+            <h3 class="text-center text-lg font-bold text-slate-900 dark:text-white mb-6">写真を追加</h3>
+            <div class="space-y-3">
+                <button onclick="InputApp.confirmSource('camera')" class="w-full py-4 bg-slate-50 dark:bg-slate-700 rounded-2xl flex items-center justify-center gap-3 font-bold text-slate-800 dark:text-white active:scale-98 transition-transform"><i class="ph-bold ph-camera text-xl text-blue-500"></i> カメラ</button>
+                <button onclick="InputApp.confirmSource('gallery')" class="w-full py-4 bg-slate-50 dark:bg-slate-700 rounded-2xl flex items-center justify-center gap-3 font-bold text-slate-800 dark:text-white active:scale-98 transition-transform"><i class="ph-bold ph-image text-xl text-purple-500"></i> ギャラリー</button>
+                <button onclick="InputApp.closeSourceSelect()" class="w-full py-4 mt-2 text-slate-400 font-bold active:text-slate-600">キャンセル</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="qr-overlay" class="fixed inset-0 z-[9999] bg-black hidden flex-col">
+        <div class="absolute top-0 left-0 w-full p-6 flex justify-end z-10">
+            <button onclick="InputApp.stopQRScanner()" class="w-10 h-10 bg-black/50 text-white rounded-full flex items-center justify-center backdrop-blur-md">
+                <i class="ph-bold ph-x text-xl"></i>
+            </button>
+        </div>
+        <div class="flex-1 relative flex items-center justify-center overflow-hidden">
+            <video id="qr-video" class="absolute inset-0 w-full h-full object-cover"></video>
+            <div class="w-64 h-64 border-2 border-blue-500 rounded-3xl relative z-10 flex items-center justify-center">
+                <div class="w-full h-0.5 bg-blue-500/50 absolute top-1/2 animate-pulse"></div>
+            </div>
+            <div class="absolute bottom-20 text-white text-sm font-bold bg-black/50 px-4 py-2 rounded-full backdrop-blur">
+                QRコードを枠に合わせてください
+            </div>
+        </div>
+        <canvas id="qr-canvas" class="hidden"></canvas>
+    </div>
+
+    <div id="drawingOverlay" class="fixed inset-0 bg-black z-[6000] hidden flex-col">
+        <div class="flex justify-between items-center px-4 py-3 bg-slate-900 text-white shrink-0">
+            <button onclick="InputApp.closeDrawing()" class="text-slate-400 font-bold text-sm">キャンセル</button>
+            <span class="font-bold">写真編集</span>
+            <button onclick="InputApp.saveDrawing()" class="text-blue-400 font-bold text-sm">保存</button>
+        </div>
+        <div class="flex-1 relative bg-black flex items-center justify-center overflow-hidden touch-none" id="canvas-container">
+            <canvas id="drawCanvas" class="max-w-full max-h-full object-contain"></canvas>
+        </div>
+        
+        <div class="px-4 py-4 bg-slate-900 text-white shrink-0 flex flex-col gap-4 safe-pb">
+            <div class="flex justify-center gap-4 border-b border-slate-700 pb-4">
+                <button onclick="InputApp.setTool('pen')" id="tool-pen" class="tool-btn w-10 h-10 rounded-xl bg-slate-700 text-white flex items-center justify-center ring-2 ring-blue-500">
+                    <i class="ph-bold ph-pencil-simple text-xl"></i>
+                </button>
+                <button onclick="InputApp.setTool('rect')" id="tool-rect" class="tool-btn w-10 h-10 rounded-xl bg-slate-800 text-slate-400 flex items-center justify-center">
+                    <i class="ph-bold ph-square text-xl"></i>
+                </button>
+                <button onclick="InputApp.setTool('circle')" id="tool-circle" class="tool-btn w-10 h-10 rounded-xl bg-slate-800 text-slate-400 flex items-center justify-center">
+                    <i class="ph-bold ph-circle text-xl"></i>
+                </button>
+            </div>
+
+            <div class="flex justify-center gap-6 items-center">
+                <button onclick="InputApp.setPenColor('red')" id="color-red" class="w-8 h-8 rounded-full bg-red-500 border-2 border-white ring-2 ring-red-500/50 transition-transform active:scale-90"></button>
+                <button onclick="InputApp.setPenColor('yellow')" id="color-yellow" class="w-8 h-8 rounded-full bg-yellow-400 border-2 border-transparent opacity-50 transition-transform active:scale-90"></button>
+                
+                <div class="w-px h-8 bg-slate-700 mx-2"></div>
+                
+                <button onclick="InputApp.undoDrawing()" class="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center border border-slate-600 active:bg-slate-600">
+                    <i class="ph-bold ph-arrow-u-up-left text-lg"></i>
+                </button>
+                
+                <button onclick="InputApp.clearCanvas()" class="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center border border-slate-600 active:bg-slate-600">
+                    <i class="ph-bold ph-trash text-lg"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <?!= include('JS_Utils'); ?>
+    <?!= include('JS_Router'); ?>
+    <?!= include('JS_Input'); ?>
+    <?!= include('JS_Dashboard'); ?>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            if(typeof AppRouter !== 'undefined') { AppRouter.init(); }
+        });
+        
+        function toggleSearch(view, show) {
+            let barId, inputId;
+            if (view === 'input') {
+                barId = 'input-search-bar';
+                inputId = 'input-search';
+            } else {
+                return; 
+            }
+
+            const bar = document.getElementById(barId);
+            const input = document.getElementById(inputId);
+
+            if (show) {
+                bar.classList.remove('translate-x-full');
+                input.focus();
+            } else {
+                bar.classList.add('translate-x-full');
+                input.value = ''; 
+                if(view === 'input') { InputApp.filterList(''); } 
+            }
+        }
+    </script>
+    <div id="custom-alert-modal" class="fixed inset-0 z-[11000] hidden flex items-center justify-center bg-slate-900/40 backdrop-blur-[2px] transition-opacity duration-300 opacity-0">
+    <div class="bg-white dark:bg-slate-800 w-[85%] max-w-[320px] rounded-[2rem] p-6 shadow-2xl border border-slate-100 dark:border-slate-700 transform scale-95 transition-all duration-300 relative overflow-hidden">
+        
+        <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-red-400 to-pink-500"></div>
+        <div class="absolute -right-6 -top-6 w-24 h-24 bg-red-50 dark:bg-red-900/10 rounded-full blur-2xl pointer-events-none"></div>
+
+        <div class="flex flex-col items-center text-center mb-5 relative z-10">
+            <div class="w-16 h-16 rounded-full bg-red-50 dark:bg-slate-700/50 flex items-center justify-center text-red-500 mb-3 shadow-inner">
+                <i class="ph-fill ph-warning-octagon text-3xl animate-pulse"></i>
+            </div>
+            <h3 class="text-lg font-black text-slate-900 dark:text-white tracking-tight">入力エラー</h3>
+            <p class="text-xs text-slate-400 font-bold mt-1">必須項目が不足しています</p>
+        </div>
+
+        <div class="bg-slate-50 dark:bg-slate-900/50 rounded-2xl p-4 mb-5 border border-slate-100 dark:border-slate-700/50">
+            <ul id="custom-alert-list" class="space-y-2">
+                </ul>
+        </div>
+
+        <button onclick="InputApp.closeCustomAlert()" class="w-full py-3.5 rounded-xl font-bold text-white bg-slate-900 dark:bg-white dark:text-slate-900 hover:opacity-90 shadow-lg shadow-slate-200/50 dark:shadow-none active:scale-95 transition-all">
+            確認して修正
+        </button>
+    </div>
+</div>
+</body>
+</html>
