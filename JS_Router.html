@@ -1,0 +1,87 @@
+<script>
+    const AppRouter = (() => {
+        let currentRoute = 'menu';
+
+        function init() {
+            // 앱 시작 시 항상 메뉴 화면부터
+            switchRoute('menu');
+        }
+
+        function switchRoute(route) {
+            // ★ [핵심 수정] 대시보드나 입력 화면으로 갈 땐, 무조건 스피너부터 띄운다!
+            // 화면이 전환되는 찰나의 순간도 로딩 중임을 보여주기 위함
+            if (route === 'dashboard' || route === 'input') {
+                const spinner = document.getElementById('loadingSpinner');
+                if (spinner) spinner.classList.remove('hidden');
+            }
+
+            currentRoute = route;
+
+            // 1. 모든 뷰 숨김
+            const dashView = document.getElementById('view-dashboard');
+            const inputView = document.getElementById('view-input');
+            const menuView = document.getElementById('view-menu');
+            
+            if(dashView) dashView.classList.add('hidden');
+            if(inputView) inputView.classList.add('hidden');
+            if(menuView) menuView.classList.add('hidden');
+
+            // 2. 탭바 스타일 초기화
+            document.querySelectorAll('.nav-item').forEach(el => {
+                el.classList.remove('active');
+                el.classList.remove('text-blue-600', 'dark:text-blue-400');
+            });
+
+            // 3. 하단 탭바 표시 제어
+            const bottomNav = document.querySelector('.bottom-nav');
+            if (route === 'menu') {
+                if(bottomNav) bottomNav.style.display = 'none';
+            } else {
+                if(bottomNav) bottomNav.style.display = 'flex';
+            }
+
+            // 4. 화면 전환 및 로직 실행
+            // setTimeout(0)을 줘서 스피너가 렌더링된 직후에 무거운 작업을 시작하게 함 (UI 블로킹 방지)
+            setTimeout(() => {
+                if (route === 'dashboard') {
+                    if(dashView) dashView.classList.remove('hidden');
+                    activateTab('nav-dash');
+                    if (typeof DashboardApp !== 'undefined') DashboardApp.init();
+
+                } else if (route === 'input') {
+                    if(inputView) inputView.classList.remove('hidden');
+                    activateTab('nav-input');
+                    // Input 화면은 데이터가 이미 있으면 로딩 안 함 (스피너 끄기)
+                    if (typeof InputApp !== 'undefined') {
+                        if (!InputApp.isLoaded) {
+                            InputApp.loadData();
+                        } else {
+                            // 이미 로딩된 상태면 스피너 바로 끄기
+                            const spinner = document.getElementById('loadingSpinner');
+                            if (spinner) spinner.classList.add('hidden');
+                        }
+                    }
+                
+                } else if (route === 'menu') {
+                    if(menuView) menuView.classList.remove('hidden');
+                    // 메뉴로 돌아올 땐 스피너 끄기
+                    const spinner = document.getElementById('loadingSpinner');
+                    if (spinner) spinner.classList.add('hidden');
+                }
+                
+                window.scrollTo(0, 0);
+            }, 10);
+        }
+
+        // 탭 활성화 도우미 함수
+        function activateTab(id) {
+            const nav = document.getElementById(id);
+            if(nav) {
+                nav.classList.add('active');
+                nav.classList.add('text-blue-600', 'dark:text-blue-400');
+            }
+        }
+
+        return { init, switch: switchRoute };
+    })();
+</script>
