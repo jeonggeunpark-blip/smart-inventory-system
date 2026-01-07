@@ -1,0 +1,532 @@
+<script>
+    // Chart.js 설정
+    Chart.register(ChartDataLabels);
+    Chart.defaults.font.family = "'Inter', 'Noto Sans JP', sans-serif";
+    Chart.defaults.color = '#64748B';
+
+    const DashboardApp = (() => {
+        const CONFIG = { KEYS: { NAME: '名前', DEPT: '部署', LOCATION: '置き場', QUANTITY: '数量', ID: 'id', P1:'写真1', P2:'写真2', P3:'写真3' } };
+        
+        const stateStore = {
+            allData: [], historicalData: { labels: [], values: [] }, lastMonthData: [],
+            filteredData: [], currentFilteredLastMonthData: [],
+            uiLang: 'ja',
+            filters: { selectedMonth: null, selectedLocation: 'all', searchQuery: '', selectedDept: null, sortKey: 'quantity_desc' },
+            chartState: { isDrilledDown: false, drillDownDept: null },
+            thresholds: { warning: 20 },
+            departmentColorMap: {}, isLoading: true, error: null,
+            groupedDataCache: {}
+        };
+        
+        const dom = {}; 
+        let departmentChartInstance = null; 
+        let comparisonChartInstance = null;
+        const chartObservers = new Map(); 
+        
+        const i18nResources = {
+            ja: { mainTitle: "在庫管理", submissionDateLabel: "提出日", monthFilterLabel: "表示月の選択", searchFilterLabel: "統合検索", warningThresholdLabel: "警告 閾値", reloadData: "更新", exportCsv: "CSV", summaryTitle: "サマリー", kpiTitle: "KPI", warningTitle: "警告", warningDescription: "閾値超過品目", detailsTitle: "詳細", loadMore: "さらに読み込む", kpiTotalQuantity: "総数量", kpiTrend: "前月比", kpiLocations: "保管場所", kpiDepartments: "部署", summaryTotal: (qty) => `総数 <strong>${qty}</strong> 個。`, summaryTrend: (trend, text) => `前月比 <span class="font-bold ${trend.color}">${trend.percentage}%</span> ${text}。`, summaryLocations: (count, top) => `全 <strong>${count}</strong> 箇所、<strong>${top}</strong> 最多。`, summaryDepts: (top) => `<strong>${top}</strong> 最多管理。`, trendIncrease: "増加", trendDecrease: "減少", trendNoChange: "なし", backButton: "戻る", retry: "再試行", noData: "データなし", errorDataLoad: "エラー発生", deptChartTitle: "部署別", individual: "個人別", comparisonChartTitle: "トレンド", comparisonChartTitleDept: (dept) => `${dept} 前月比`, newLabel: "NEW", lastMonthCompare: (change) => `前月比: ${change > 0 ? '+' : ''}${change}`, allLocations: "全場所", latestData: "最新", unclassified: "未分類", columnHeaders: { name: "名前", department: "部署", location: "場所", quantity: "数量" } },
+            en: { mainTitle: "Inventory", submissionDateLabel: "Date", monthFilterLabel: "Month", searchFilterLabel: "Search", warningThresholdLabel: "Limit", reloadData: "Reload", exportCsv: "CSV", summaryTitle: "Summary", kpiTitle: "KPI", warningTitle: "Alerts", warningDescription: "Over limit items", detailsTitle: "Details", loadMore: "Load More", kpiTotalQuantity: "Total Qty", kpiTrend: "Trend", kpiLocations: "Locations", kpiDepartments: "Depts", summaryTotal: (qty) => `Total <strong>${qty}</strong>.`, summaryTrend: (trend, text) => `<span class="font-bold ${trend.color}">${trend.percentage}%</span> ${text}.`, summaryLocations: (count, top) => `<strong>${top}</strong> top of <strong>${count}</strong>.`, summaryDepts: (top) => `<strong>${top}</strong> top.`, trendIncrease: "up", trendDecrease: "down", trendNoChange: "flat", backButton: "Back", retry: "Retry", noData: "No Data", errorDataLoad: "Error", deptChartTitle: "By Dept", individual: "Individual", comparisonChartTitle: "Trend", comparisonChartTitleDept: (dept) => `${dept} Trend`, newLabel: "NEW", lastMonthCompare: (change) => `vs LM: ${change > 0 ? '+' : ''}${change}`, allLocations: "All", latestData: "Latest", unclassified: "N/A", columnHeaders: { name: "Name", department: "Dept", location: "Loc", quantity: "Qty" } }
+        };
+
+        const utils = {
+            t: (key, ...args) => { const resource = i18nResources[stateStore.uiLang] || i18nResources.ja; const keys = key.split('.'); let value = resource; for (const k of keys) { value = value ? value[k] : undefined; } if (typeof value === 'function') return value(...args); if (value === undefined) { if (key === 'unclassified') return '未分類'; return key; } return value; },
+            debounce: GlobalUtils.debounce,
+            htmlToElement: (html) => { const template = document.createElement('template'); template.innerHTML = html.trim(); return template.content; },
+            escapeHtml: GlobalUtils.escapeHtml,
+            formatNumber: (num) => { try { const locale = (stateStore.uiLang || 'ja').replace('_', '-'); return new Intl.NumberFormat(locale).format(num); } catch (e) { return String(num); } },
+            saveState: () => { try { const stateToSave = { uiLang: stateStore.uiLang, filters: stateStore.filters, thresholds: stateStore.thresholds }; localStorage.setItem('dashboardState_v4.2', JSON.stringify(stateToSave)); } catch (e) { console.error('Failed to save state:', e); } },
+            loadState: () => { try { const savedState = JSON.parse(localStorage.getItem('dashboardState_v4.2') || 'null'); if (savedState) { setState({ uiLang: savedState.uiLang || 'ja' }); setState({ filters: savedState.filters || stateStore.filters }); setState({ thresholds: savedState.thresholds || stateStore.thresholds }); } } catch (e) { console.error('Failed to load state:', e); } },
+            getTrend: (current, last) => { if (last > 0) { const percentage = Number((((current - last) / last) * 100).toFixed(1)); const text = current > last ? utils.t('trendIncrease') : (current < last ? utils.t('trendDecrease') : utils.t('trendNoChange')); const color = current > last ? 'text-red-500' : (current < last ? 'text-green-500' : 'text-slate-400'); return { percentage, text, color, change: current - last }; } return { percentage: 0.0, text: utils.t('trendNoChange'), color: 'text-slate-400', change: 0 }; },
+            hexToRgba: GlobalUtils.hexToRgba,
+            getChartSortComparator: (sortKey) => { return (a, b) => { switch (sortKey) { case 'quantity_asc': return a[1] - b[1]; case 'name_asc': case 'dept_asc': return a[0].localeCompare(b[0]); case 'quantity_desc': default: return b[1] - a[1]; } }; }
+        };
+
+        function cacheDom() { const ids = [ 'progressBarLoader','errorBanner','errorMessage','errorRetryBtn','submissionDate', 'langSwitcher','monthFilter','searchFilter','warningThreshold','reloadButton', 'themeToggleBtn', 'exportCsvButton', 'themeIcon', 'summaryList', 'kpiGrid', 'warningContainer', 'warningTableBody','warningTableHeader', 'departmentChart','deptChartTitle','comparisonChart','comparisonChartTitle', 'locationFilter','dataCardsContainer', 'loadMoreContainer','loadMoreBtn', 'intro-screen' ]; ids.forEach(id => { dom[id] = document.getElementById(id); }); }
+        
+        function renderWarning() {
+            const K = CONFIG.KEYS; const threshold = stateStore.thresholds.warning;
+            const dataSource = stateStore.filteredData && stateStore.filteredData.length > 0 ? stateStore.filteredData : stateStore.allData;
+            const warningItems = dataSource.filter(item => Number(item[K.QUANTITY]) > threshold);
+            if (!dom.warningContainer) return;
+            if (warningItems.length === 0) { dom.warningContainer.style.display = 'none'; return; }
+            dom.warningContainer.style.display = 'flex'; 
+            dom.warningTableBody.innerHTML = '';
+            warningItems.sort((a,b) => Number(b[K.QUANTITY]) - Number(a[K.QUANTITY])).forEach(item => { const tr = document.createElement('tr'); tr.className = 'border-b border-red-100 dark:border-red-900/30 last:border-0'; const tdName = document.createElement('td'); tdName.className = 'py-2 px-4 text-slate-800 dark:text-slate-200 font-medium truncate max-w-[120px]'; tdName.textContent = item[K.NAME] || ''; const tdQty = document.createElement('td'); tdQty.className = 'py-2 px-4 text-right tabular-nums text-red-600 dark:text-red-400 font-bold'; tdQty.textContent = utils.formatNumber(item[K.QUANTITY] || 0); tr.appendChild(tdName); tr.appendChild(tdQty); dom.warningTableBody.appendChild(tr); });
+        }
+
+        function setState(partial) { Object.keys(partial).forEach(k => { const newVal = partial[k]; const curVal = stateStore[k]; if (isPlainObject(curVal) && isPlainObject(newVal)) { stateStore[k] = { ...curVal, ...newVal }; } else { stateStore[k] = newVal; } }); }
+        function isPlainObject(v) { return v && typeof v === 'object' && !Array.isArray(v); }
+
+        const api = {
+            getSheetData: (month) => new Promise((resolve, reject) => { if (window.google && google.script && google.script.run) { google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).getSheetData(month); } else { setTimeout(() => resolve({ current: [], historical: { labels: [], values: [] }, lastMonthData: [], sheetName: "No Data" }), 1500); } }),
+            getSheetNames: () => new Promise((resolve, reject) => { if (window.google && google.script && google.script.run) { google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).getSheetNames(); } else { setTimeout(() => resolve(["2025-03-20"]), 300); } })
+        };
+
+        // ★ [수정됨] fetchData 함수 (스피너 로직 최적화)
+        async function fetchData(isRetry = false) {
+            const spinner = document.getElementById('loadingSpinner');
+            
+            // 라우터에서 이미 켰겠지만, 혹시 모르니 안전장치로 한 번 더 켬
+            if (spinner) spinner.classList.remove('hidden');
+            
+            if (!isRetry) { setState({ isLoading: true, error: null }); }
+            
+            try {
+                // 데이터를 가져오는 긴 시간... (이때 스피너가 계속 돌고 있음)
+                const data = await api.getSheetData(stateStore.filters.selectedMonth).catch(err => { throw err; });
+                
+                // 인트로 화면이 있다면 끄기
+                if (dom['intro-screen']) { 
+                    dom['intro-screen'].classList.add('fade-out'); 
+                    setTimeout(() => { if(typeof IntroNetwork !== 'undefined') IntroNetwork.stop(); }, 1200); 
+                }
+                
+                if (dom.submissionDate) dom.submissionDate.textContent = data.sheetName ? data.sheetName.replace(/-/g, '/') : 'N/A';
+                _updateColorMap(data.current || []);
+                setState({ allData: data.current || [], historicalData: data.historical || { labels: [], values: [] }, lastMonthData: data.lastMonthData || [], isLoading: false, error: null });
+                applyFiltersAndRender();
+                renderComparisonChart();
+                renderDepartmentChart();
+            } catch (error) { 
+                console.error("Data fetch failed:", error); 
+                setState({ isLoading: false, error: utils.t('errorDataLoad') }); 
+                if (dom['intro-screen']) { dom['intro-screen'].classList.add('fade-out'); if(typeof IntroNetwork !== 'undefined') IntroNetwork.stop(); } 
+                render(); 
+            } finally {
+                // ★ [핵심] 모든 작업이 끝났을 때만 스피너를 끈다!
+                if (spinner) spinner.classList.add('hidden');
+            }
+        }
+
+        function populateLocationFilterFromData(baseData) {
+            if (!dom.locationFilter) return;
+            const K = CONFIG.KEYS; const unclassifiedLabel = utils.t('unclassified');
+            const locations = [...new Set(baseData.map(item => item[K.LOCATION] || unclassifiedLabel))].sort();
+            const prevValue = stateStore.filters.selectedLocation;
+            dom.locationFilter.innerHTML = ''; const optAll = document.createElement('option'); optAll.value = 'all'; optAll.textContent = utils.t('allLocations'); dom.locationFilter.appendChild(optAll);
+            locations.forEach(loc => { const opt = document.createElement('option'); opt.value = loc; opt.textContent = loc; dom.locationFilter.appendChild(opt); });
+            const hasPrev = prevValue === 'all' || locations.includes(prevValue); if (!hasPrev) setState({ filters: { selectedLocation: 'all' } }); dom.locationFilter.value = stateStore.filters.selectedLocation || 'all';
+        }
+
+        function applyFiltersAndRender() {
+            const { searchQuery, selectedLocation, selectedDept } = stateStore.filters; const query = (searchQuery || '').toLowerCase().trim(); const K = CONFIG.KEYS; const unclassifiedLabel = utils.t('unclassified');
+            let filteredCurrent = stateStore.allData.slice();
+            if (selectedDept) filteredCurrent = filteredCurrent.filter(item => (item[K.DEPT] || unclassifiedLabel) === selectedDept);
+            if (query) { filteredCurrent = filteredCurrent.filter(item => (item[K.NAME] || '').toLowerCase().includes(query) || (item[K.DEPT] || unclassifiedLabel).toLowerCase().includes(query) || (item[K.LOCATION] || unclassifiedLabel).toLowerCase().includes(query)); }
+            populateLocationFilterFromData(filteredCurrent);
+            if (selectedLocation !== 'all') { filteredCurrent = filteredCurrent.filter(item => (item[K.LOCATION] || unclassifiedLabel) === selectedLocation); }
+            let filteredLast = stateStore.lastMonthData.slice();
+            if (selectedDept) filteredLast = filteredLast.filter(item => (item[K.DEPT] || unclassifiedLabel) === selectedDept);
+            if (query) { filteredLast = filteredLast.filter(item => (item[K.NAME] || '').toLowerCase().includes(query) || (item[K.DEPT] || unclassifiedLabel).toLowerCase().includes(query) || (item[K.LOCATION] || unclassifiedLabel).toLowerCase().includes(query)); }
+            if (selectedLocation !== 'all') { filteredLast = filteredLast.filter(item => (item[K.LOCATION] || unclassifiedLabel) === selectedLocation); }
+            
+            setState({ filteredData: filteredCurrent, currentFilteredLastMonthData: filteredLast });
+            render(); 
+            utils.saveState();
+        }
+
+        function _updateColorMap(data) {
+            const K = CONFIG.KEYS; const unclassifiedLabel = utils.t('unclassified');
+            const departments = [...new Set(data.map(item => item[K.DEPT] || unclassifiedLabel))];
+            const newColorMap = { ...stateStore.departmentColorMap };
+            departments.forEach((dept, i) => { if (!newColorMap[dept]) newColorMap[dept] = COLOR_PALETTE[i % COLOR_PALETTE.length]; });
+            setState({ departmentColorMap: newColorMap });
+        }
+
+        function render() {
+            if (stateStore.isLoading) { if(dom.progressBarLoader && dom['intro-screen'] && dom['intro-screen'].classList.contains('fade-out')) { dom.progressBarLoader.style.display = 'block'; } return; }
+            if(dom.progressBarLoader) dom.progressBarLoader.style.display = 'none';
+            renderUIStrings(); renderSummary(); renderKPIs(); renderWarning(); 
+            renderGroupedList(stateStore.filteredData); 
+        }
+
+        function renderUIStrings() { document.querySelectorAll('[data-i18n]').forEach(el => { const key = el.dataset.i18n; const text = utils.t(key); if (text && el.textContent !== text) el.textContent = text; }); }
+
+        function renderSummary() {
+            if (!dom.summaryList) return; const K = CONFIG.KEYS; const unclassifiedLabel = utils.t('unclassified');
+            const dataSource = stateStore.filteredData || stateStore.allData; const lastMonthDataSource = stateStore.currentFilteredLastMonthData || stateStore.lastMonthData;
+            const totalQuantity = dataSource.reduce((s, item) => s + (Number(item[K.QUANTITY]) || 0), 0); const lastMonthTotal = lastMonthDataSource.reduce((s, item) => s + (Number(item[K.QUANTITY]) || 0), 0);
+            const trend = utils.getTrend(totalQuantity, lastMonthTotal); const trendText = trend.percentage !== 0.0 ? utils.t('summaryTrend', trend, trend.text) : trend.text;
+            const locations = [...new Set(dataSource.map(item => item[K.LOCATION] || unclassifiedLabel))];
+            const topLocation = Object.entries(dataSource.reduce((acc, item) => { const loc = item[K.LOCATION] || unclassifiedLabel; acc[loc] = (acc[loc] || 0) + (Number(item[K.QUANTITY]) || 0); return acc; }, {})).sort((a,b)=>b[1]-a[1])[0]?.[0] || 'N/A';
+            const topDept = Object.entries(dataSource.reduce((acc,item)=>{ const dept = item[K.DEPT] || unclassifiedLabel; acc[dept] = (acc[dept] || 0) + (Number(item[K.QUANTITY]) || 0); return acc; }, {})).sort((a,b)=>b[1]-a[1])[0]?.[0] || 'N/A';
+            const totalHtml = utils.t('summaryTotal', utils.formatNumber(totalQuantity)); const locationsHtml = utils.t('summaryLocations', locations.length, utils.escapeHtml(topLocation)); const deptsHtml = utils.t('summaryDepts', utils.escapeHtml(topDept));
+            dom.summaryList.innerHTML = `<li class="flex items-start gap-3"><div class="mt-0.5"><i class="ph-fill ph-trend-up text-blue-500"></i></div><span class="leading-relaxed">${totalHtml} ${trendText}</span></li><li class="flex items-start gap-3"><div class="mt-0.5"><i class="ph-fill ph-map-pin text-orange-500"></i></div><span class="leading-relaxed">${locationsHtml}</span></li><li class="flex items-start gap-3"><div class="mt-0.5"><i class="ph-fill ph-users text-emerald-500"></i></div><span class="leading-relaxed">${deptsHtml}</span></li>`;
+        }
+
+        function renderKPIs() {
+            if (!dom.kpiGrid) return; const K = CONFIG.KEYS; const unclassifiedLabel = utils.t('unclassified');
+            const dataSource = stateStore.filteredData || stateStore.allData; const lastMonthDataSource = stateStore.currentFilteredLastMonthData || stateStore.lastMonthData;
+            const totalQuantity = dataSource.reduce((sum, item) => sum + (Number(item[K.QUANTITY]) || 0), 0); const lastMonthTotal = lastMonthDataSource.reduce((sum, item) => sum + (Number(item[K.QUANTITY]) || 0), 0);
+            const trend = utils.getTrend(totalQuantity, lastMonthTotal); const icon = trend.change > 0 ? 'ph-caret-up' : 'ph-caret-down';
+            const locationCount = [...new Set(dataSource.map(item => item[K.LOCATION] || unclassifiedLabel))].length; const departmentCount = [...new Set(dataSource.map(item => item[K.DEPT] || unclassifiedLabel))].length; const lastMonthDepartmentCount = [...new Set(lastMonthDataSource.map(item => item[K.DEPT] || unclassifiedLabel))].length;
+            let deptTrendSubtext = '', deptTrendColor = '';
+            if (lastMonthDataSource.length > 0) { const deptChange = departmentCount - lastMonthDepartmentCount; if (deptChange > 0) { deptTrendSubtext = `+${utils.formatNumber(deptChange)}`; deptTrendColor='text-red-500'; } else if (deptChange < 0) { deptTrendSubtext = `${utils.formatNumber(deptChange)}`; deptTrendColor='text-green-500'; } else { deptTrendSubtext = `-`; deptTrendColor='text-slate-400'; } } else if (stateStore.allData.length > 0) { deptTrendSubtext = '-'; }
+            const kpiData = { totalQuantity, trend, locationCount, departmentCount };
+            const kpis = [ 
+                { id:'total-quantity', label: utils.t('kpiTotalQuantity'), value: utils.formatNumber(kpiData.totalQuantity), icon: 'ph-stack', color: 'text-blue-600 dark:text-blue-400', bg: 'bg-blue-50 dark:bg-blue-900/20' }, 
+                { id:'trend', label: utils.t('kpiTrend'), value: `${Math.abs(trend.percentage)}%`, subtext: trend.change !== 0 ? (trend.change > 0 ? '▲' : '▼') : '-', color: trend.color, bg: 'bg-slate-50 dark:bg-slate-800', icon: 'ph-chart-line-up' }, 
+                { id:'locations', label: utils.t('kpiLocations'), value: utils.formatNumber(kpiData.locationCount), icon: 'ph-map-trifold', color: 'text-orange-600 dark:text-orange-400', bg: 'bg-orange-50 dark:bg-orange-900/20' }, 
+                { id:'departments', label: utils.t('kpiDepartments'), value: utils.formatNumber(kpiData.departmentCount), subtext: deptTrendSubtext, subtextColor: deptTrendColor, icon: 'ph-buildings', color: 'text-emerald-600 dark:text-emerald-400', bg: 'bg-emerald-50 dark:bg-emerald-900/20' } 
+            ];
+            dom.kpiGrid.innerHTML = kpis.map((kpi, index) => `
+                <div class="relative ${kpi.bg || 'bg-white dark:bg-slate-800'} p-2.5 rounded-xl border border-slate-100 dark:border-slate-700 h-[70px] flex flex-col justify-center overflow-hidden group">
+                    <div class="absolute right-[-10px] bottom-[-10px] opacity-10 text-5xl pointer-events-none text-slate-900 dark:text-white transition-transform group-hover:scale-110"><i class="ph-fill ${kpi.icon}"></i></div>
+                    <p class="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-tight z-10">${kpi.label}</p>
+                    <div class="flex items-baseline gap-1 z-10">
+                        <p class="text-xl font-bold ${kpi.color || 'text-slate-800 dark:text-white'} leading-tight tabular-nums">${kpi.value}</p>
+                        ${kpi.subtext ? `<span class="text-[10px] font-semibold ${kpi.subtextColor || kpi.color} tabular-nums">${kpi.subtext}</span>` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // 그리드 리스트 렌더링
+        function renderGroupedList(data) {
+            const container = dom.dataCardsContainer; 
+            if (!container) return;
+            container.innerHTML = "";
+
+            if(dom.loadMoreBtn) dom.loadMoreBtn.classList.add('hidden');
+
+            if (!data || data.length === 0) {
+                container.innerHTML = `<div class="col-span-full text-center py-10 text-slate-400"><i class="ph-duotone ph-magnifying-glass text-3xl mb-2"></i><p class="text-sm">${utils.t('noData')}</p></div>`;
+                return;
+            }
+
+            const K = CONFIG.KEYS;
+            const unclassifiedLabel = utils.t('unclassified');
+
+            const groupedByLocation = data.reduce((acc, item) => {
+                const locKey = item[K.LOCATION] || unclassifiedLabel; 
+                if (!acc[locKey]) acc[locKey] = [];
+                acc[locKey].push(item);
+                return acc;
+            }, {});
+
+            stateStore.groupedDataCache = groupedByLocation;
+
+            const sortedLocations = Object.keys(groupedByLocation).sort();
+
+            container.className = "grid grid-cols-2 gap-3 pb-20";
+
+            const fragment = document.createDocumentFragment();
+            sortedLocations.forEach(loc => {
+                const locItems = groupedByLocation[loc];
+                const totalQty = locItems.reduce((sum, item) => sum + (Number(item[K.QUANTITY]) || 0), 0);
+                
+                const card = document.createElement('div');
+                card.className = "bg-white dark:bg-slate-800 rounded-2xl p-4 shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col items-start gap-2 cursor-pointer active:scale-95 transition-transform hover:border-blue-300 dark:hover:border-blue-600";
+                card.onclick = () => openLocationDetail(loc);
+
+                card.innerHTML = `
+                    <div class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center text-blue-500 mb-1">
+                        <i class="ph-fill ph-map-pin text-xl"></i>
+                    </div>
+                    <div class="w-full">
+                        <h3 class="font-bold text-sm text-slate-900 dark:text-white truncate w-full">${loc}</h3>
+                        <div class="flex justify-between items-center mt-1">
+                            <span class="text-[10px] text-slate-400 font-bold bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded">${locItems.length} 件</span>
+                            <span class="text-xs font-bold text-slate-700 dark:text-slate-300">${utils.formatNumber(totalQty)} <span class="text-[9px] font-normal text-slate-400">個</span></span>
+                        </div>
+                    </div>
+                `;
+                fragment.appendChild(card);
+            });
+            container.appendChild(fragment);
+        }
+
+        // 장소 상세 팝업 열기
+        function openLocationDetail(locationName) {
+            const panel = document.getElementById('dashboard-panel');
+            const title = document.getElementById('dash-panel-title');
+            const content = document.getElementById('dash-panel-content');
+            const overlay = document.getElementById('form-overlay');
+
+            if (!panel || !content) return;
+
+            title.innerText = locationName;
+
+            const items = stateStore.groupedDataCache[locationName] || [];
+            const K = CONFIG.KEYS;
+            
+            items.sort((a, b) => (Number(b[K.QUANTITY]) || 0) - (Number(a[K.QUANTITY]) || 0));
+
+            content.innerHTML = items.map(item => {
+                const hasPhoto = (item[K.P1] || item[K.P2] || item[K.P3]);
+                
+                let photoIcon = `<div class="w-10 h-10 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center text-slate-300"><i class="ph-duotone ph-cube text-lg"></i></div>`;
+                
+                if (item.photo1 && item.photo1.includes('base64')) {
+                    photoIcon = `<img src="${item.photo1}" class="w-10 h-10 rounded-lg object-cover border border-slate-200 dark:border-slate-600">`;
+                } else if (hasPhoto) {
+                    photoIcon = `<div class="w-10 h-10 rounded-lg bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center text-blue-500"><i class="ph-fill ph-image text-lg"></i></div>`;
+                }
+
+                const clickAttr = hasPhoto ? `onclick="DashboardApp.openPhoto('${item[K.ID]}')"` : "";
+                const cursorClass = hasPhoto ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50" : "";
+
+                return `
+                    <div class="flex items-center gap-3 p-3 bg-white dark:bg-slate-800 rounded-xl border border-slate-100 dark:border-slate-700 shadow-sm ${cursorClass}" ${clickAttr}>
+                        ${photoIcon}
+                        <div class="flex-1 min-w-0">
+                            <div class="text-sm font-bold text-slate-900 dark:text-white truncate">${item[K.NAME] || '-'}</div>
+                            <div class="text-[10px] text-slate-400 truncate">${item[K.DEPT] || '-'}</div>
+                        </div>
+                        <div class="text-right">
+                            <span class="block text-base font-bold text-slate-900 dark:text-white leading-none">${item[K.QUANTITY] || 0}</span>
+                            <span class="text-[9px] text-slate-400">個</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            overlay.style.display = 'block';
+            setTimeout(() => {
+                overlay.classList.add('open');
+                panel.classList.add('open');
+            }, 10);
+        }
+
+        function closeLocationDetail() {
+            const panel = document.getElementById('dashboard-panel');
+            const overlay = document.getElementById('form-overlay');
+            
+            if (panel) panel.classList.remove('open');
+            if (overlay) overlay.classList.remove('open');
+            
+            setTimeout(() => {
+                if (overlay) overlay.style.display = 'none';
+            }, 300);
+        }
+
+        function setupChartObservers() { const observer = new IntersectionObserver((entries, obs) => { entries.forEach(entry => { if (entry.isIntersecting) { const canvas = entry.target; if (canvas.id === 'departmentChart') renderDepartmentChart(); else if (canvas.id === 'comparisonChart') renderComparisonChart(); obs.unobserve(canvas); } }); }, { rootMargin: '50px' }); document.querySelectorAll('.lazy-chart').forEach(chart => { if (!chart) return; const previous = chartObservers.get(chart); if (previous) previous.disconnect(); chartObservers.set(chart, observer); observer.observe(chart); }); }
+        
+        function renderDepartmentChart() {
+    if (!dom.departmentChart) return;
+    
+    const K = CONFIG.KEYS;
+    const unclassifiedLabel = utils.t('unclassified');
+    const isDark = document.documentElement.classList.contains('dark');
+    const textColor = isDark ? '#94A3B8' : '#64748B';
+    const gridColor = isDark ? '#334155' : '#f1f5f9';
+
+    // 제목 설정 (DrillDown 여부에 따라)
+    dom.deptChartTitle.innerHTML = stateStore.chartState.isDrilledDown 
+        ? `<button class="mr-2 hover:text-blue-500" onclick="DashboardApp.handleDeptChartBack()"><i class="ph-bold ph-arrow-left"></i></button> ${stateStore.chartState.drillDownDept}` 
+        : utils.t('deptChartTitle');
+
+    // 데이터 집계 로직
+    let dataForChart;
+    if (stateStore.chartState.isDrilledDown) {
+        const deptName = stateStore.chartState.drillDownDept;
+        dataForChart = stateStore.filteredData.filter(it => (it[K.DEPT] || unclassifiedLabel) === deptName).reduce((acc, curr) => {
+            acc[curr[K.NAME]] = (acc[curr[K.NAME]] || 0) + (Number(curr[K.QUANTITY]) || 0);
+            return acc;
+        }, {});
+    } else {
+        dataForChart = stateStore.filteredData.reduce((acc, curr) => {
+            const dept = curr[K.DEPT] || unclassifiedLabel;
+            acc[dept] = (acc[dept] || 0) + (Number(curr[K.QUANTITY]) || 0);
+            return acc;
+        }, {});
+    }
+
+    // 정렬 및 데이터셋 준비
+    const sortComparator = utils.getChartSortComparator(stateStore.filters.sortKey);
+    const entries = Object.entries(dataForChart).sort(sortComparator);
+    const labels = entries.map(e => e[0]);
+    const values = entries.map(e => e[1]);
+    const backgroundColors = labels.map((l, idx) => stateStore.departmentColorMap[l] || COLOR_PALETTE[idx % COLOR_PALETTE.length]);
+
+    // 기존 차트 파괴 (메모리 누수 방지)
+    if (departmentChartInstance) {
+        try { departmentChartInstance.destroy(); } catch (e) {}
+        departmentChartInstance = null;
+    }
+
+    // ★★★ 차트 생성 및 옵션 설정 (여기를 수정했습니다) ★★★
+    const ctx = dom.departmentChart.getContext('2d');
+    const dataset = {
+        label: utils.t('kpiTotalQuantity'),
+        data: values,
+        backgroundColor: backgroundColors,
+        borderRadius: 8,
+        borderSkipped: false,
+        maxBarThickness: 30
+    };
+
+    departmentChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: { labels, datasets: [dataset] },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            onClick: (evt, elements) => {
+                if (stateStore.chartState.isDrilledDown) {
+                    if (elements.length === 0) handleDeptChartBack();
+                } else {
+                    if (elements && elements.length > 0) {
+                        const idx = elements[0].index;
+                        const clickedLabel = departmentChartInstance.data.labels[idx];
+                        handleDeptChartClick(clickedLabel);
+                    }
+                }
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: isDark ? '#1f2937' : '#fff',
+                    titleColor: isDark ? '#fff' : '#000',
+                    bodyColor: isDark ? '#ccc' : '#666',
+                    borderColor: isDark ? '#374151' : '#e2e8f0',
+                    borderWidth: 1,
+                    padding: 10,
+                    cornerRadius: 10
+                },
+                datalabels: {
+                    anchor: 'end',
+                    align: 'top',
+                    color: textColor,
+                    font: { weight: 'bold', size: 10 },
+                    formatter: val => utils.formatNumber(val)
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    
+                    // ▼▼▼ [수정된 부분] 여기에 grace 옵션을 추가했습니다! ▼▼▼
+                    grace: '15%', 
+                    // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+                    
+                    grid: { color: gridColor },
+                    border: { display: false },
+                    ticks: { font: { size: 10 }, color: textColor }
+                },
+                x: {
+                    grid: { display: false },
+                    border: { display: false },
+                    ticks: {
+                        autoSkip: false,
+                        maxRotation: 45,
+                        minRotation: 45,
+                        font: { size: 9 },
+                        color: textColor
+                    }
+                }
+            }
+        }
+    });
+}
+
+        function renderComparisonChart() {
+            if (!dom.comparisonChart) return; const K = CONFIG.KEYS; const isDark = document.documentElement.classList.contains('dark'); const textColor = isDark ? '#94A3B8' : '#64748B'; const gridColor = isDark ? '#334155' : '#f1f5f9';
+            if (comparisonChartInstance) { try { comparisonChartInstance.destroy(); } catch (e) {} comparisonChartInstance = null; }
+            let labels = [], values = [];
+            if (stateStore.chartState.isDrilledDown) { const dept = stateStore.chartState.drillDownDept; dom.comparisonChartTitle.textContent = utils.t('comparisonChartTitleDept', dept); const unclassifiedLabel = utils.t('unclassified'); const filterLogic = item => (item[K.DEPT] || unclassifiedLabel) === dept; const current = stateStore.filteredData.filter(filterLogic).reduce((s,it)=>s+(Number(it[K.QUANTITY])||0),0); const last = stateStore.currentFilteredLastMonthData.filter(filterLogic).reduce((s,it)=>s+(Number(it[K.QUANTITY])||0),0); labels = [utils.t('kpiTrend'), utils.t('kpiTotalQuantity')]; values = [last, current]; } else { dom.comparisonChartTitle.innerHTML = utils.t('comparisonChartTitle'); labels = stateStore.historicalData.labels || []; values = stateStore.historicalData.values || []; }
+            const ctx = dom.comparisonChart.getContext('2d');
+            comparisonChartInstance = new Chart(ctx, { type: 'bar', data: { labels, datasets: [ { label: utils.t('kpiTotalQuantity'), data: values, backgroundColor: [utils.hexToRgba('#cbd5e1',0.6), utils.hexToRgba('#3B82F6',0.8)], borderRadius: 6, barPercentage: 0.6 }, { type: 'line', label: 'Trend', data: values, borderColor: '#F59E0B', borderWidth: 2, tension: 0.4, pointBackgroundColor: '#fff', pointBorderColor: '#F59E0B', pointRadius: 3, fill: false, datalabels: { display: false } } ]}, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, grid: { color: gridColor }, border: { display: false }, ticks: { font: { size: 10 }, color: textColor }}, x: { grid: { display: false }, border: { display: false }, ticks: { font: { size: 10 }, color: textColor }}}, plugins: { legend: { display: false }, tooltip: { backgroundColor: isDark ? '#1f2937' : '#fff', titleColor: isDark?'#fff':'#000', bodyColor: isDark?'#ccc':'#666', borderColor: isDark ? '#374151' : '#e2e8f0', borderWidth: 1 }, datalabels: { anchor: 'end', align: 'top', color: textColor, font: { weight: 'bold', size: 10 }, formatter: val => utils.formatNumber(val) } } } });
+        }
+
+        // [수정됨] 갱신 버튼 로직 개선 (최신 날짜 자동 선택)
+        function bindEvents() {
+            if (dom.reloadButton) {
+                dom.reloadButton.addEventListener('click', async () => { 
+                    const spinner = document.getElementById('loadingSpinner');
+                    if (spinner) spinner.classList.remove('hidden');
+
+                    try {
+                        // 1. 현재 선택된 날짜 초기화
+                        if(dom.monthFilter) dom.monthFilter.value = "";
+                        stateStore.filters.selectedMonth = null;
+
+                        // 2. 날짜 목록(필터)을 서버에서 다시 가져와서 "가장 최신 날짜"로 재설정
+                        await populateFilters();
+
+                        // 3. 설정된 최신 날짜로 데이터 가져오기
+                        await fetchData(); 
+                    } catch (e) {
+                        console.error(e);
+                        if (spinner) spinner.classList.add('hidden');
+                    }
+                });
+            }
+            
+            if (dom.exportCsvButton) dom.exportCsvButton.addEventListener('click', handleExportCsv);
+            if (dom.locationFilter) dom.locationFilter.addEventListener('change', handleFilterChange);
+            if (dom.monthFilter) dom.monthFilter.addEventListener('change', handleMonthChange);
+            if (dom.searchFilter) dom.searchFilter.addEventListener('input', utils.debounce(handleFilterChange, 300));
+            if (dom.warningThreshold) dom.warningThreshold.addEventListener('change', handleThresholdChange);
+            if (dom.langSwitcher) dom.langSwitcher.addEventListener('change', handleLangChange);
+            if (dom.loadMoreBtn) dom.loadMoreBtn.addEventListener('click', handleLoadMore);
+        }
+
+        function handleFilterChange() { setState({ filters: { ...stateStore.filters, selectedLocation: dom.locationFilter ? dom.locationFilter.value : 'all', searchQuery: dom.searchFilter.value || '', sortKey: 'quantity_desc', selectedDept: null }, chartState: { isDrilledDown: false, drillDownDept: null } }); const params = new URLSearchParams(window.location.search); params.set('location', stateStore.filters.selectedLocation || 'all'); params.set('q', stateStore.filters.searchQuery || ''); history.pushState(null, '', '?' + params.toString()); applyFiltersAndRender(); renderDepartmentChart(); renderComparisonChart(); }
+        function handleMonthChange(e) { const selectedMonth = e.target.value || null; setState({ filters: { ...stateStore.filters, selectedMonth, selectedDept: null, selectedLocation: 'all', searchQuery: '' }, chartState: { isDrilledDown: false, drillDownDept: null } }); dom.searchFilter.value = ''; if (dom.locationFilter) dom.locationFilter.value = 'all'; const params = new URLSearchParams(window.location.search); if (selectedMonth) params.set('month', selectedMonth); else params.delete('month'); history.pushState(null, '', '?' + params.toString()); fetchData(); }
+        function handleThresholdChange(e) { const value = parseInt(e.target.value, 10); if (!isNaN(value) && value > 0) { setState({ thresholds: { warning: value }}); utils.saveState(); renderWarning(); } }
+        function handleLangChange(e) { setState({ uiLang: e.target.value }); utils.saveState(); populateFilters(true); applyFiltersAndRender(); renderDepartmentChart(); renderComparisonChart(); }
+        function handleDeptChartClick(clickedLabel) { if (stateStore.chartState.isDrilledDown) return; setState({ chartState: { isDrilledDown: true, drillDownDept: clickedLabel }, filters: { ...stateStore.filters, searchQuery: '', selectedDept: clickedLabel, selectedLocation: 'all' }}); dom.searchFilter.value = ''; if (dom.locationFilter) dom.locationFilter.value = 'all'; const params = new URLSearchParams(window.location.search); params.delete('q'); params.set('location','all'); history.pushState(null, '', '?' + params.toString()); applyFiltersAndRender(); renderDepartmentChart(); renderComparisonChart(); }
+        function handleDeptChartBack() { setState({ chartState: { isDrilledDown: false, drillDownDept: null }, filters: { ...stateStore.filters, searchQuery: '', selectedDept: null, selectedLocation: 'all' }}); dom.searchFilter.value = ''; if (dom.locationFilter) dom.locationFilter.value = 'all'; const params = new URLSearchParams(window.location.search); params.delete('q'); params.set('location','all'); history.pushState(null, '', '?' + params.toString()); applyFiltersAndRender(); renderDepartmentChart(); renderComparisonChart(); }
+        function handleLoadMore() { /* Grid View does not use load more button */ }
+        function handleExportCsv() { const K = CONFIG.KEYS; const unclassifiedLabel = utils.t('unclassified'); const headers = [K.NAME, K.DEPT, K.LOCATION, K.QUANTITY]; const rows = stateStore.allData.map(item => { const vals = [ item[K.NAME] || '', item[K.DEPT] || unclassifiedLabel, item[K.LOCATION] || unclassifiedLabel, item[K.QUANTITY] || 0 ]; return vals.map(v => `"${String(v).replace(/"/g,'""')}"`).join(','); }); const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + [headers.join(','), ...rows].join("\n"); const link = document.createElement('a'); link.setAttribute('href', encodeURI(csvContent)); link.setAttribute('download', `dashboard_data_${new Date().toISOString().slice(0,10)}.csv`); document.body.appendChild(link); link.click(); document.body.removeChild(link); }
+        
+        async function populateFilters(isLangChange = false) { 
+            if (!isLangChange) { 
+                try { 
+                    const sheetNames = await api.getSheetNames(); 
+                    sheetNames.sort((a, b) => new Date(b) - new Date(a));
+
+                    dom.monthFilter.innerHTML = ''; 
+                    (sheetNames || []).forEach(name => { 
+                        const opt = document.createElement('option'); 
+                        opt.value = name; 
+                        opt.textContent = `${name.replace(/-/g,'/')}`; 
+                        dom.monthFilter.appendChild(opt); 
+                    }); 
+
+                    if (!stateStore.filters.selectedMonth && sheetNames.length > 0) {
+                        stateStore.filters.selectedMonth = sheetNames[0];
+                    }
+                    dom.monthFilter.value = stateStore.filters.selectedMonth || ''; 
+
+                } catch (e) { 
+                    console.warn('Month filter error', e); 
+                } 
+            } 
+        }
+        
+        function openPhoto(id) {
+            const item = stateStore.allData.find(i => String(i.id) === String(id));
+            if (item && typeof InputApp !== 'undefined') { InputApp.openGallery(item); }
+        }
+
+        async function init() {
+            try {
+                cacheDom(); utils.loadState();
+                
+                const params = new URLSearchParams(window.location.search);
+                if (params.has('location')) setState({ filters: { ...stateStore.filters, selectedLocation: params.get('location') }});
+                if (params.has('q')) setState({ filters: { ...stateStore.filters, searchQuery: params.get('q') }});
+                if (params.has('month')) setState({ filters: { ...stateStore.filters, selectedMonth: params.get('month') }});
+                
+                dom.langSwitcher.value = stateStore.uiLang; 
+                dom.warningThreshold.value = stateStore.thresholds.warning; 
+                dom.searchFilter.value = stateStore.filters.searchQuery;
+                
+                bindEvents();
+                
+                await populateFilters();
+                await fetchData(false); 
+                
+                setTimeout(() => setupChartObservers(), 500);
+            } catch (e) { 
+                console.error('init error', e); 
+                setState({ isLoading: false, error: utils.t('errorDataLoad') }); 
+                render(); 
+            }
+        }
+
+        return { init, handleDeptChartBack, openPhoto, openLocationDetail, closeLocationDetail };
+    })();
+</script>
