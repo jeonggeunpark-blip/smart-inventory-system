@@ -1,0 +1,271 @@
+<script>
+    const DrawingApp = (() => {
+        let canvas, ctx;
+        let isDrawing = false;
+        let currentColor = '#ef4444';
+        let currentTool = 'pen'; // pen, rect, circle, text
+        let startX, startY;
+        let targetImgId, targetFileId;
+        
+        //Undo 및 미리보기(도형/텍스트)를 위한 히스토리 배열
+        let drawingHistory = [];
+        
+        // 텍스트 라이브 입력을 위한 상태 변수
+        let textPos = { x: 0, y: 0 };
+        let isTextMode = false;
+
+        function init() {
+            canvas = document.getElementById('drawingCanvas');
+            ctx = canvas.getContext('2d', { willReadFrequently: true });
+            setupEvents();
+        }
+
+        function setupEvents() {
+            // 터치 및 마우스 이벤트 통합 등록
+            const eventPairs = [
+                ['mousedown', startDrawing], ['mousemove', draw], ['mouseup', stopDrawing],
+                ['touchstart', startDrawing], ['touchmove', draw], ['touchend', stopDrawing]
+            ];
+            eventPairs.forEach(([type, fn]) => canvas.addEventListener(type, fn, { passive: false }));
+            
+            // 라이브 텍스트 입력창 엔터키 이벤트
+            const textInput = document.getElementById('live-text-input');
+            if (textInput) {
+                textInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') finishText();
+                });
+            }
+        }
+
+        // 도구 변경
+        function setTool(tool, el) {
+            currentTool = tool;
+            isTextMode = false; // 다른 도구 선택 시 텍스트 모드 해제
+            document.getElementById('live-text-bar').classList.add('hidden');
+
+            document.querySelectorAll('.tool-btn').forEach(btn => {
+                btn.classList.replace('bg-blue-600', 'bg-slate-800');
+                btn.classList.remove('ring-2', 'ring-white');
+            });
+            el.classList.replace('bg-slate-800', 'bg-blue-600');
+            el.classList.add('ring-2', 'ring-white');
+        }
+
+        // 색상 변경
+        function setColor(color, el) {
+            currentColor = color;
+            document.querySelectorAll('.color-btn').forEach(btn => {
+                btn.classList.remove('ring-4', 'ring-white', 'scale-110');
+                btn.classList.add('ring-2', 'ring-slate-700');
+            });
+            el.classList.remove('ring-2', 'ring-slate-700');
+            el.classList.add('ring-4', 'ring-white', 'scale-110');
+            
+            // 만약 라이브 텍스트 입력 중 색상을 바꾸면 즉시 반영
+            if (isTextMode) {
+                updateLiveText(document.getElementById('live-text-input').value);
+            }
+        }
+
+        function open(fileId, imgId) {
+            targetFileId = fileId;
+            targetImgId = imgId;
+            const img = document.getElementById(imgId);
+            const overlay = document.getElementById('drawingOverlay');
+            
+            overlay.classList.remove('hidden');
+            overlay.classList.add('flex');
+
+            const container = document.getElementById('canvas-container');
+            const dpr = window.devicePixelRatio || 1;
+            
+            // 컨테이너 크기에 맞춰 캔버스 비율 계산
+            const imgRatio = img.naturalWidth / img.naturalHeight;
+            let canvasW = container.clientWidth;
+            let canvasH = container.clientWidth / imgRatio;
+
+            if (canvasH > container.clientHeight) {
+                canvasH = container.clientHeight;
+                canvasW = container.clientHeight * imgRatio;
+            }
+
+            canvas.width = canvasW * dpr;
+            canvas.height = canvasH * dpr;
+            canvas.style.width = canvasW + 'px';
+            canvas.style.height = canvasH + 'px';
+            
+            ctx.scale(dpr, dpr);
+            ctx.drawImage(img, 0, 0, canvasW, canvasH);
+            
+            // 초기 상태 저장
+            drawingHistory = [];
+            saveHistory();
+
+            // 도구 및 색상 초기화 (빨간색 펜 기본)
+            setTool('pen', document.querySelector('.tool-btn'));
+            setColor('#ef4444', document.querySelector('.color-btn'));
+        }
+
+        function getXY(e) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return {
+                x: (clientX - rect.left),
+                y: (clientY - rect.top)
+            };
+        }
+
+        function startDrawing(e) {
+            const pos = getXY(e);
+            startX = pos.x;
+            startY = pos.y;
+
+            if (currentTool === 'text') {
+                textPos = pos;
+                showLiveTextBar();
+                return;
+            }
+
+            isDrawing = true;
+            ctx.beginPath();
+            ctx.moveTo(startX, startY);
+            ctx.strokeStyle = currentColor;
+            ctx.lineWidth = 4;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            if (e.cancelable) e.preventDefault();
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            const pos = getXY(e);
+
+            // 펜이 아닐 경우(도형), 이전 상태를 다시 그려서 '미리보기' 효과 구현
+            if (currentTool !== 'pen') {
+                const lastImg = drawingHistory[drawingHistory.length - 1];
+                ctx.putImageData(lastImg, 0, 0);
+            }
+
+            ctx.strokeStyle = currentColor;
+            ctx.lineWidth = 4;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            if (currentTool === 'pen') {
+                ctx.lineTo(pos.x, pos.y);
+                ctx.stroke();
+            } else if (currentTool === 'rect') {
+                ctx.beginPath();
+                ctx.strokeRect(startX, startY, pos.x - startX, pos.y - startY);
+            } else if (currentTool === 'circle') {
+                // ★★★ 수정된 직관적인 원형 그리기 로직 ★★★
+                ctx.beginPath();
+                const x = startX;
+                const y = startY;
+                const w = pos.x - startX;
+                const h = pos.y - startY;
+                
+                // 사각형 영역 안에 꼭 맞는 타원을 그리는 공식 (Bezier Curve 이용)
+                const kappa = .5522848,
+                    ox = (w / 2) * kappa, // control point offset horizontal
+                    oy = (h / 2) * kappa, // control point offset vertical
+                    xe = x + w,           // x-end
+                    ye = y + h,           // y-end
+                    xm = x + w / 2,       // x-middle
+                    ym = y + h / 2;       // y-middle
+
+                ctx.moveTo(x, ym);
+                ctx.bezierCurveTo(x, ym - oy, xm - ox, y, xm, y);
+                ctx.bezierCurveTo(xm + ox, y, xe, ym - oy, xe, ym);
+                ctx.bezierCurveTo(xe, ym + oy, xm + ox, ye, xm, ye);
+                ctx.bezierCurveTo(xm - ox, ye, x, ym + oy, x, ym);
+                ctx.stroke();
+            }
+            if (e.cancelable) e.preventDefault();
+        }
+        function stopDrawing() {
+            if (isDrawing) {
+                isDrawing = false;
+                saveHistory();
+            }
+        }
+
+        // --- 라이브 텍스트 로직 ---
+        function showLiveTextBar() {
+            const bar = document.getElementById('live-text-bar');
+            const input = document.getElementById('live-text-input');
+            input.value = '';
+            bar.classList.remove('hidden');
+            setTimeout(() => input.focus(), 100);
+            isTextMode = true;
+        }
+
+        function updateLiveText(val) {
+            if (!isTextMode) return;
+            
+            // 이전 상태로 캔버스 초기화 (글자 써지는 모습 실시간 갱신)
+            const lastImg = drawingHistory[drawingHistory.length - 1];
+            ctx.putImageData(lastImg, 0, 0);
+
+            if (val.trim() !== "") {
+                ctx.font = "bold 24px 'Noto Sans JP', sans-serif";
+                ctx.fillStyle = currentColor;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(val, textPos.x, textPos.y);
+            }
+        }
+
+        function finishText() {
+            const val = document.getElementById('live-text-input').value;
+            if (val.trim() !== "") {
+                saveHistory(); // 최종 입력된 글자를 히스토리에 저장
+            }
+            document.getElementById('live-text-bar').classList.add('hidden');
+            isTextMode = false;
+        }
+
+        function closeTextBar() {
+            document.getElementById('live-text-bar').classList.add('hidden');
+            // 입력 취소 시 글자가 없는 상태로 캔버스 복원
+            const lastImg = drawingHistory[drawingHistory.length - 1];
+            ctx.putImageData(lastImg, 0, 0);
+            isTextMode = false;
+        }
+
+        // --- 유틸리티 함수 ---
+        function saveHistory() {
+            drawingHistory.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+            if (drawingHistory.length > 30) drawingHistory.shift();
+        }
+
+        function undo() {
+            if (drawingHistory.length > 1) {
+                drawingHistory.pop();
+                const lastState = drawingHistory[drawingHistory.length - 1];
+                ctx.putImageData(lastState, 0, 0);
+            }
+        }
+
+        function save() {
+            if (isTextMode) finishText(); // 저장 전 텍스트 입력 중이면 완료 처리
+
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+            document.getElementById(targetImgId).src = dataUrl;
+            if (window.InputApp) InputApp.setEditedImage(targetFileId, dataUrl);
+            close();
+        }
+
+        function close() {
+            document.getElementById('drawingOverlay').classList.add('hidden');
+            document.getElementById('live-text-bar').classList.add('hidden');
+            drawingHistory = [];
+            isTextMode = false;
+        }
+
+        return { init, open, save, close, setColor, setTool, undo, updateLiveText, finishText, closeTextBar };
+    })();
+
+    document.addEventListener('DOMContentLoaded', DrawingApp.init);
+</script>
