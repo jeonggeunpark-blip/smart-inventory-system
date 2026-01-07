@@ -1,0 +1,196 @@
+<script>
+    // ======================================================================
+    // [PART 1] 인트로 애니메이션 (Canvas Particles)
+    // ======================================================================
+    const IntroAnim = (() => {
+        let animationFrameId;
+        let canvas, ctx;
+        let width, height;
+        let particles = [];
+        const PARTICLE_COUNT = 60; // 입자 개수
+        
+        function init() {
+            canvas = document.getElementById('intro-canvas');
+            if (!canvas) return;
+
+            ctx = canvas.getContext('2d');
+            
+            // 리사이즈 핸들러
+            const resize = () => {
+                width = canvas.width = window.innerWidth;
+                height = canvas.height = window.innerHeight;
+            };
+            window.addEventListener('resize', resize);
+            resize();
+
+            // 파티클 객체 정의
+            class Particle {
+                constructor() {
+                    this.x = Math.random() * width;
+                    this.y = Math.random() * height;
+                    this.vx = (Math.random() - 0.5) * 1.0; // 속도 조절
+                    this.vy = (Math.random() - 0.5) * 1.0;
+                    this.size = Math.random() * 2 + 1;
+                }
+                update() {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    // 화면 밖으로 나가면 반대편에서 튕김
+                    if (this.x < 0 || this.x > width) this.vx *= -1;
+                    if (this.y < 0 || this.y > height) this.vy *= -1;
+                }
+                draw() {
+                    const isDark = document.documentElement.classList.contains('dark');
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                    // 다크모드일 땐 흰색, 라이트모드일 땐 파란색 입자
+                    ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.5)' : 'rgba(59, 130, 246, 0.5)'; 
+                    ctx.fill();
+                }
+            }
+
+            // 파티클 생성
+            particles = [];
+            for (let i = 0; i < PARTICLE_COUNT; i++) particles.push(new Particle());
+
+            animate();
+        }
+
+        function animate() {
+            const introScreen = document.getElementById('intro-screen');
+            // 화면이 사라졌다면 애니메이션 중지 (성능 최적화)
+            if (!introScreen || introScreen.classList.contains('fade-out')) {
+                cancelAnimationFrame(animationFrameId);
+                return; 
+            }
+
+            ctx.clearRect(0, 0, width, height);
+            const isDark = document.documentElement.classList.contains('dark');
+            
+            // 선 색상 설정 (다크모드: 희미한 흰색, 라이트모드: 희미한 파란색)
+            ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(59, 130, 246, 0.08)';
+            
+            for (let i = 0; i < particles.length; i++) {
+                const p1 = particles[i];
+                p1.update();
+                p1.draw();
+                
+                // 가까운 입자끼리 선 연결 (네트워크 효과)
+                for (let j = i + 1; j < particles.length; j++) {
+                    const p2 = particles[j];
+                    const dx = p1.x - p2.x;
+                    const dy = p1.y - p2.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (dist < 150) { // 거리가 150 미만일 때만 연결
+                        ctx.beginPath();
+                        ctx.moveTo(p1.x, p1.y);
+                        ctx.lineTo(p2.x, p2.y);
+                        ctx.stroke();
+                    }
+                }
+            }
+            animationFrameId = requestAnimationFrame(animate);
+        }
+
+        return { 
+            start: init,
+            stop: () => {
+                const el = document.getElementById('intro-screen');
+                if(el) el.classList.add('fade-out');
+                if(animationFrameId) cancelAnimationFrame(animationFrameId);
+            }
+        };
+    })();
+
+    // 기존 코드와의 호환성을 위해 전역 변수 할당
+    var IntroNetwork = IntroAnim;
+
+    // 페이지 로드 시 애니메이션 시작
+    document.addEventListener('DOMContentLoaded', IntroAnim.start);
+
+    // 안전 장치 (5초 뒤 강제 종료)
+    setTimeout(() => {
+        const intro = document.getElementById('intro-screen');
+        if (intro && !intro.classList.contains('fade-out')) {
+            console.warn('Forcing loader hide due to timeout');
+            IntroAnim.stop();
+        }
+    }, 5000);
+
+
+    // ======================================================================
+    // [PART 2] ★ 테마 매니저 (Dark Mode) - 심플하고 강력한 버전
+    // ======================================================================
+    window.ThemeManager = {
+        init: function() {
+            // 1. 저장된 테마 불러오기
+            const savedTheme = localStorage.getItem('theme');
+            const isDark = savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            
+            // 2. 화면에 적용
+            if (isDark) document.documentElement.classList.add('dark');
+            else document.documentElement.classList.remove('dark');
+            
+            this.updateIcon();
+        },
+
+        toggle: function() {
+            // 3. 토글 (켜져있으면 끄고, 꺼져있으면 켬)
+            const isDark = document.documentElement.classList.toggle('dark');
+            localStorage.setItem('theme', isDark ? 'dark' : 'light');
+            this.updateIcon();
+        },
+
+        updateIcon: function() {
+            // 4. 아이콘 모양 바꾸기
+            const icon = document.getElementById('themeIcon');
+            if (icon) {
+                const isDark = document.documentElement.classList.contains('dark');
+                icon.className = isDark ? 'ph-bold ph-sun' : 'ph-bold ph-moon';
+            }
+        }
+    };
+
+    // 앱 켜지자마자 테마 적용 실행
+    window.ThemeManager.init();
+
+
+    // ======================================================================
+    // [PART 3] 전역 유틸리티 (Global Constants & Utils)
+    // ======================================================================
+    const COLOR_PALETTE = ['rgba(59, 130, 246, 0.9)', 'rgba(16, 185, 129, 0.9)', 'rgba(245, 158, 11, 0.9)', 'rgba(239, 68, 68, 0.9)'];
+    
+    const GlobalUtils = {
+        debounce: (func, delay = 300) => { 
+            let timeoutId = null; 
+            return (...args) => { 
+                if (timeoutId) clearTimeout(timeoutId); 
+                timeoutId = setTimeout(() => { try { func(...args); } catch (err) { console.error(err); } }, delay); 
+            }; 
+        },
+        escapeHtml: (str) => { 
+            if (str === null || str === undefined) return ''; 
+            return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); 
+        },
+        formatNumber: (num) => { 
+            try { 
+                const locale = (localStorage.getItem('uiLang') || 'ja').replace('_', '-'); 
+                return new Intl.NumberFormat(locale).format(num); 
+            } catch (e) { return String(num); } 
+        },
+        hexToRgba: (hex, alpha = 1) => { 
+            try { 
+                if (!hex || !/^#([A-Fa-f0-9]{3}){1,2}$/.test(hex)) return `rgba(0,0,0,${alpha})`; 
+                let c = hex.substring(1).split(''); 
+                if (c.length === 3) c = [c[0],c[0],c[1],c[1],c[2],c[2]]; 
+                c = '0x' + c.join(''); 
+                return `rgba(${[(c>>16)&255, (c>>8)&255, c&255].join(',')},${alpha})`; 
+            } catch (e) { return `rgba(0,0,0,${alpha})`; } 
+        },
+        t: (key, ...args) => {
+            // i18n 리소스는 DashboardApp에 정의되어 있음 (여기서는 Pass-through)
+            return key; 
+        }
+    };
+</script>
